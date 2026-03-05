@@ -11,6 +11,7 @@ pub mod js_core;
 pub mod mcp;
 mod prolog_service;
 pub mod runtime_service;
+pub mod sfu;
 mod surreal_service;
 pub mod user_management;
 pub mod utils;
@@ -320,6 +321,16 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
 
     info!("Initializing Prolog service...");
     init_prolog_service().await;
+
+    // Initialize SFU service if the feature is enabled
+    #[cfg(feature = "sfu")]
+    {
+        info!("Initializing SFU service...");
+        match sfu::SfuService::start(sfu::server::SfuServerConfig::default()).await {
+            Ok(_service) => info!("SFU service started successfully"),
+            Err(e) => error!("Failed to start SFU service: {}", e),
+        }
+    }
 
     find_and_set_port(&mut config.gql_port, 4000, "GraphQL");
     find_and_set_port(&mut config.hc_admin_port, 2000, "Holochain admin");

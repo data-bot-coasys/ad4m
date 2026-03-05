@@ -988,6 +988,63 @@ impl Query {
             Err(e) => Err(FieldError::new(e.to_string(), Value::null())),
         }
     }
+
+    // ---- SFU queries ----
+
+    #[cfg(feature = "sfu")]
+    async fn sfu_rooms(_context: &RequestContext) -> FieldResult<Vec<crate::sfu::graphql_types::types::SfuRoomGql>> {
+        use crate::sfu::graphql_types::types::*;
+        use crate::sfu::get_sfu_service;
+
+        let service = get_sfu_service()
+            .ok_or_else(|| FieldError::new("SFU service not available", Value::null()))?;
+
+        let rooms = service.list_rooms().await;
+        Ok(rooms.iter().map(|r| SfuRoomGql {
+            neighbourhood_url: r.neighbourhood_url.clone(),
+            room_name: r.room_name.clone(),
+            participant_count: r.participant_count as i32,
+            participants: r.participants.iter().map(|p| SfuParticipantGql {
+                agent_did: p.agent_did.clone(),
+                has_audio: p.has_audio,
+                has_video: p.has_video,
+                is_active_speaker: p.is_active_speaker,
+            }).collect(),
+        }).collect())
+    }
+
+    #[cfg(feature = "sfu")]
+    async fn sfu_peer_for_neighbourhood(
+        _context: &RequestContext,
+        neighbourhood_url: String,
+    ) -> FieldResult<Option<String>> {
+        use crate::sfu::get_sfu_service;
+
+        let service = get_sfu_service()
+            .ok_or_else(|| FieldError::new("SFU service not available", Value::null()))?;
+
+        Ok(service.sfu_peer_for_neighbourhood(&neighbourhood_url).await)
+    }
+
+    #[cfg(feature = "sfu")]
+    async fn sfu_config(
+        _context: &RequestContext,
+        neighbourhood_url: String,
+    ) -> FieldResult<crate::sfu::graphql_types::types::SfuConfigGql> {
+        use crate::sfu::graphql_types::types::*;
+        use crate::sfu::get_sfu_service;
+
+        let service = get_sfu_service()
+            .ok_or_else(|| FieldError::new("SFU service not available", Value::null()))?;
+
+        let config = service.get_config(&neighbourhood_url).await;
+        Ok(SfuConfigGql {
+            mode: config.mode,
+            designated_peer: config.designated_peer,
+            fallback: config.fallback,
+            max_mesh_participants: config.max_mesh_participants as i32,
+        })
+    }
 }
 
 /// Build an ExpressionRendered from a raw JsonValue expression and language address.

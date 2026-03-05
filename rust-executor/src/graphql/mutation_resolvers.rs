@@ -2978,4 +2978,129 @@ impl Mutation {
 
         Ok(true)
     }
+
+    // ---- SFU mutations ----
+
+    #[cfg(feature = "sfu")]
+    async fn sfu_start_room(
+        _context: &RequestContext,
+        neighbourhood_url: String,
+        room_id: String,
+    ) -> FieldResult<crate::sfu::graphql_types::types::SfuRoomGql> {
+        use crate::sfu::graphql_types::types::*;
+        use crate::sfu::get_sfu_service;
+
+        let service = get_sfu_service()
+            .ok_or_else(|| FieldError::new("SFU service not available", Value::null()))?;
+
+        let room = service.start_room(&neighbourhood_url, &room_id).await
+            .map_err(|e| FieldError::new(e, Value::null()))?;
+
+        Ok(SfuRoomGql {
+            neighbourhood_url: room.neighbourhood_url,
+            room_name: room.room_name,
+            participant_count: room.participant_count as i32,
+            participants: room.participants.iter().map(|p| SfuParticipantGql {
+                agent_did: p.agent_did.clone(),
+                has_audio: p.has_audio,
+                has_video: p.has_video,
+                is_active_speaker: p.is_active_speaker,
+            }).collect(),
+        })
+    }
+
+    #[cfg(feature = "sfu")]
+    async fn sfu_stop_room(
+        _context: &RequestContext,
+        neighbourhood_url: String,
+        room_id: String,
+    ) -> FieldResult<bool> {
+        use crate::sfu::get_sfu_service;
+
+        let service = get_sfu_service()
+            .ok_or_else(|| FieldError::new("SFU service not available", Value::null()))?;
+
+        service.stop_room(&neighbourhood_url, &room_id).await
+            .map_err(|e| FieldError::new(e, Value::null()))
+    }
+
+    #[cfg(feature = "sfu")]
+    async fn call_join(
+        _context: &RequestContext,
+        neighbourhood_url: String,
+        room_id: String,
+        sdp_offer: String,
+    ) -> FieldResult<crate::sfu::graphql_types::types::CallSessionGql> {
+        use crate::sfu::graphql_types::types::*;
+        use crate::sfu::get_sfu_service;
+
+        let service = get_sfu_service()
+            .ok_or_else(|| FieldError::new("SFU service not available", Value::null()))?;
+
+        // Get the agent DID from the agent service
+        let agent_did = crate::agent::did();
+
+        // TODO: Verify neighbourhood membership via the perspective/neighbourhood system
+        // For now, trust the caller if they have a valid agent DID
+        let is_member = true;
+
+        let session = service.call_join(
+            &neighbourhood_url,
+            &room_id,
+            &agent_did,
+            &sdp_offer,
+            is_member,
+        ).await.map_err(|e| FieldError::new(e, Value::null()))?;
+
+        Ok(CallSessionGql {
+            room_name: session.room_name,
+            neighbourhood_url: session.neighbourhood_url,
+            participant_id: session.participant_id,
+            sdp_answer: session.sdp_answer,
+        })
+    }
+
+    #[cfg(feature = "sfu")]
+    async fn call_leave(
+        _context: &RequestContext,
+        neighbourhood_url: String,
+        room_id: String,
+    ) -> FieldResult<bool> {
+        use crate::sfu::get_sfu_service;
+
+        let service = get_sfu_service()
+            .ok_or_else(|| FieldError::new("SFU service not available", Value::null()))?;
+
+        let agent_did = crate::agent::did();
+
+        service.call_leave(&neighbourhood_url, &room_id, &agent_did).await
+            .map_err(|e| FieldError::new(e, Value::null()))
+    }
+
+    #[cfg(feature = "sfu")]
+    async fn sfu_set_config(
+        _context: &RequestContext,
+        neighbourhood_url: String,
+        mode: String,
+        designated_peer: Option<String>,
+        fallback: Option<String>,
+        max_mesh_participants: Option<i32>,
+    ) -> FieldResult<bool> {
+        use crate::sfu::get_sfu_service;
+
+        let service = get_sfu_service()
+            .ok_or_else(|| FieldError::new("SFU service not available", Value::null()))?;
+
+        let config = crate::sfu::SfuConfig {
+            mode,
+            designated_peer,
+            fallback: fallback.unwrap_or_else(|| "mesh".to_string()),
+            max_mesh_participants: max_mesh_participants.unwrap_or(4) as u32,
+        };
+
+        service.set_config(&neighbourhood_url, config).await
+            .map_err(|e| FieldError::new(e, Value::null()))?;
+
+        Ok(true)
+    }
 }

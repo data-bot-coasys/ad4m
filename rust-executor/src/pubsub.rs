@@ -131,6 +131,10 @@ lazy_static::lazy_static! {
     pub static ref AI_TRANSCRIPTION_TEXT_TOPIC: String = "ai-transcription-text-topic".to_owned();
     pub static ref AI_MODEL_LOADING_STATUS: String = "ai-model-loading-status".to_owned();
     pub static ref PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC: String = "perspective-query-subscription-topic".to_owned();
+
+    // SFU topics
+    pub static ref SFU_CALL_PARTICIPANTS_TOPIC: String = "sfu-call-participants-topic".to_owned();
+    pub static ref SFU_CALL_STREAMS_TOPIC: String = "sfu-call-streams-topic".to_owned();
 }
 
 pub async fn get_global_pubsub() -> Arc<PubSub> {

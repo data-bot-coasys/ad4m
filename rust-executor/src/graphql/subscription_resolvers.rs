@@ -562,4 +562,36 @@ impl Subscription {
             }
         }
     }
+
+    #[cfg(feature = "sfu")]
+    async fn call_participants(
+        &self,
+        _context: &RequestContext,
+        room_id: String,
+    ) -> Pin<Box<dyn Stream<Item = FieldResult<crate::sfu::graphql_types::types::CallParticipantEvent>> + Send>> {
+        use crate::pubsub::SFU_CALL_PARTICIPANTS_TOPIC;
+        let pubsub = get_global_pubsub().await;
+        subscribe_and_process::<crate::sfu::graphql_types::types::CallParticipantEvent>(
+            pubsub,
+            SFU_CALL_PARTICIPANTS_TOPIC.to_string(),
+            Some(room_id),
+        )
+        .await
+    }
+
+    #[cfg(feature = "sfu")]
+    async fn call_streams(
+        &self,
+        _context: &RequestContext,
+        room_id: String,
+    ) -> Pin<Box<dyn Stream<Item = FieldResult<crate::sfu::graphql_types::types::CallStreamEvent>> + Send>> {
+        use crate::pubsub::SFU_CALL_STREAMS_TOPIC;
+        let pubsub = get_global_pubsub().await;
+        subscribe_and_process::<crate::sfu::graphql_types::types::CallStreamEvent>(
+            pubsub,
+            SFU_CALL_STREAMS_TOPIC.to_string(),
+            Some(room_id),
+        )
+        .await
+    }
 }
