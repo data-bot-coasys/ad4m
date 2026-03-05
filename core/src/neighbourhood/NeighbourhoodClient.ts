@@ -292,4 +292,152 @@ export class NeighbourhoodClient {
             }
         }
     }
+
+    // ---- SFU API ----
+
+    async sfuStartRoom(neighbourhoodUrl: string, roomId: string): Promise<SfuRoom> {
+        const { sfuStartRoom } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation sfuStartRoom($neighbourhoodUrl: String!, $roomId: String!) {
+                sfuStartRoom(neighbourhoodUrl: $neighbourhoodUrl, roomId: $roomId) {
+                    neighbourhoodUrl
+                    roomName
+                    participantCount
+                    participants { agentDid hasAudio hasVideo isActiveSpeaker }
+                }
+            }`,
+            variables: { neighbourhoodUrl, roomId }
+        }))
+        return sfuStartRoom
+    }
+
+    async sfuStopRoom(neighbourhoodUrl: string, roomId: string): Promise<boolean> {
+        const { sfuStopRoom } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation sfuStopRoom($neighbourhoodUrl: String!, $roomId: String!) {
+                sfuStopRoom(neighbourhoodUrl: $neighbourhoodUrl, roomId: $roomId)
+            }`,
+            variables: { neighbourhoodUrl, roomId }
+        }))
+        return sfuStopRoom
+    }
+
+    async callJoin(neighbourhoodUrl: string, roomId: string, sdpOffer: string): Promise<CallSession> {
+        const { callJoin } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation callJoin($neighbourhoodUrl: String!, $roomId: String!, $sdpOffer: String!) {
+                callJoin(neighbourhoodUrl: $neighbourhoodUrl, roomId: $roomId, sdpOffer: $sdpOffer) {
+                    roomName
+                    neighbourhoodUrl
+                    participantId
+                    sdpAnswer
+                }
+            }`,
+            variables: { neighbourhoodUrl, roomId, sdpOffer }
+        }))
+        return callJoin
+    }
+
+    async callLeave(neighbourhoodUrl: string, roomId: string): Promise<boolean> {
+        const { callLeave } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation callLeave($neighbourhoodUrl: String!, $roomId: String!) {
+                callLeave(neighbourhoodUrl: $neighbourhoodUrl, roomId: $roomId)
+            }`,
+            variables: { neighbourhoodUrl, roomId }
+        }))
+        return callLeave
+    }
+
+    async sfuRooms(): Promise<SfuRoom[]> {
+        const { sfuRooms } = unwrapApolloResult(await this.#apolloClient.query({
+            query: gql`query sfuRooms {
+                sfuRooms {
+                    neighbourhoodUrl
+                    roomName
+                    participantCount
+                    participants { agentDid hasAudio hasVideo isActiveSpeaker }
+                }
+            }`
+        }))
+        return sfuRooms
+    }
+
+    async sfuPeerForNeighbourhood(neighbourhoodUrl: string): Promise<string | null> {
+        const { sfuPeerForNeighbourhood } = unwrapApolloResult(await this.#apolloClient.query({
+            query: gql`query sfuPeerForNeighbourhood($neighbourhoodUrl: String!) {
+                sfuPeerForNeighbourhood(neighbourhoodUrl: $neighbourhoodUrl)
+            }`,
+            variables: { neighbourhoodUrl }
+        }))
+        return sfuPeerForNeighbourhood
+    }
+
+    async sfuConfig(neighbourhoodUrl: string): Promise<SfuConfig> {
+        const { sfuConfig } = unwrapApolloResult(await this.#apolloClient.query({
+            query: gql`query sfuConfig($neighbourhoodUrl: String!) {
+                sfuConfig(neighbourhoodUrl: $neighbourhoodUrl) {
+                    mode
+                    designatedPeer
+                    fallback
+                    maxMeshParticipants
+                }
+            }`,
+            variables: { neighbourhoodUrl }
+        }))
+        return sfuConfig
+    }
+
+    async sfuSetConfig(neighbourhoodUrl: string, config: Partial<SfuConfig>): Promise<boolean> {
+        const { sfuSetConfig } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation sfuSetConfig(
+                $neighbourhoodUrl: String!,
+                $mode: String!,
+                $designatedPeer: String,
+                $fallback: String,
+                $maxMeshParticipants: Int
+            ) {
+                sfuSetConfig(
+                    neighbourhoodUrl: $neighbourhoodUrl,
+                    mode: $mode,
+                    designatedPeer: $designatedPeer,
+                    fallback: $fallback,
+                    maxMeshParticipants: $maxMeshParticipants
+                )
+            }`,
+            variables: {
+                neighbourhoodUrl,
+                mode: config.mode || "mesh",
+                designatedPeer: config.designatedPeer,
+                fallback: config.fallback,
+                maxMeshParticipants: config.maxMeshParticipants,
+            }
+        }))
+        return sfuSetConfig
+    }
+}
+
+// SFU types
+export interface SfuRoom {
+    neighbourhoodUrl: string
+    roomName: string
+    participantCount: number
+    participants: SfuParticipant[]
+}
+
+export interface SfuParticipant {
+    agentDid: string
+    hasAudio: boolean
+    hasVideo: boolean
+    isActiveSpeaker: boolean
+}
+
+export interface CallSession {
+    roomName: string
+    neighbourhoodUrl: string
+    participantId: string
+    sdpAnswer: string
+}
+
+export interface SfuConfig {
+    mode: "gateway" | "designated" | "mesh"
+    designatedPeer: string | null
+    fallback: string
+    maxMeshParticipants: number
 }

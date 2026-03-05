@@ -1,7 +1,7 @@
 import { DID } from "../DID";
 import { OnlineAgent } from "../language/Language";
 import { Perspective, PerspectiveExpression, PerspectiveUnsignedInput } from "../perspectives/Perspective";
-import { NeighbourhoodClient } from "./NeighbourhoodClient";
+import { NeighbourhoodClient, SfuRoom, CallSession, SfuConfig } from "./NeighbourhoodClient";
 
 export class NeighbourhoodProxy {
     #client: NeighbourhoodClient
@@ -54,5 +54,50 @@ export class NeighbourhoodProxy {
 
     removeSignalHandler(handler: (payload: PerspectiveExpression) => void) {
         this.#client.removeSignalHandler(this.#pID, handler)
+    }
+
+    // ---- SFU API ----
+
+    async sfuStartRoom(roomId: string): Promise<SfuRoom> {
+        const url = await this.#getNeighbourhoodUrl()
+        return await this.#client.sfuStartRoom(url, roomId)
+    }
+
+    async sfuStopRoom(roomId: string): Promise<boolean> {
+        const url = await this.#getNeighbourhoodUrl()
+        return await this.#client.sfuStopRoom(url, roomId)
+    }
+
+    async callJoin(roomId: string, sdpOffer: string): Promise<CallSession> {
+        const url = await this.#getNeighbourhoodUrl()
+        return await this.#client.callJoin(url, roomId, sdpOffer)
+    }
+
+    async callLeave(roomId: string): Promise<boolean> {
+        const url = await this.#getNeighbourhoodUrl()
+        return await this.#client.callLeave(url, roomId)
+    }
+
+    async sfuPeer(): Promise<string | null> {
+        const url = await this.#getNeighbourhoodUrl()
+        return await this.#client.sfuPeerForNeighbourhood(url)
+    }
+
+    async sfuConfig(): Promise<SfuConfig> {
+        const url = await this.#getNeighbourhoodUrl()
+        return await this.#client.sfuConfig(url)
+    }
+
+    async sfuSetConfig(config: Partial<SfuConfig>): Promise<boolean> {
+        const url = await this.#getNeighbourhoodUrl()
+        return await this.#client.sfuSetConfig(url, config)
+    }
+
+    // The neighbourhood URL is needed for SFU API calls.
+    // We use the perspective UUID to identify the neighbourhood, but the SFU service
+    // uses the neighbourhood URL as its key. This helper resolves it.
+    async #getNeighbourhoodUrl(): Promise<string> {
+        // The perspective UUID IS the neighbourhood URL in the current implementation
+        return this.#pID
     }
 }
