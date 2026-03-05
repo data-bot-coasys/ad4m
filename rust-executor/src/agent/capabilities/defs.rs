@@ -24,6 +24,7 @@ pub const RUNTIME_FRIENDS: &str = "runtime.friends";
 pub const RUNTIME_MESSAGES: &str = "runtime.messages";
 pub const RUNTIME_USER_MANAGEMENT: &str = "runtime.user_management";
 pub const AI: &str = "artificial intelligence";
+pub const RUNTIME_SFU: &str = "runtime.sfu";
 
 // admin capabilities
 lazy_static! {
@@ -216,6 +217,31 @@ lazy_static! {
             pointers: vec![WILD_CARD.to_string()],
         },
         can: vec![WILD_CARD.to_string()],
+    };
+
+    // SFU capabilities
+    pub static ref RUNTIME_SFU_MANAGE_CAPABILITY: Capability = Capability {
+        with: Resource {
+            domain: RUNTIME_SFU.to_string(),
+            pointers: vec![WILD_CARD.to_string()],
+        },
+        can: vec![CREATE.to_string(), DELETE.to_string(), UPDATE.to_string()],
+    };
+
+    pub static ref RUNTIME_SFU_CALL_CAPABILITY: Capability = Capability {
+        with: Resource {
+            domain: RUNTIME_SFU.to_string(),
+            pointers: vec![WILD_CARD.to_string()],
+        },
+        can: vec![READ.to_string(), CREATE.to_string()],
+    };
+
+    pub static ref RUNTIME_SFU_READ_CAPABILITY: Capability = Capability {
+        with: Resource {
+            domain: RUNTIME_SFU.to_string(),
+            pointers: vec![WILD_CARD.to_string()],
+        },
+        can: vec![READ.to_string()],
     };
 
 }
@@ -539,7 +565,12 @@ pub fn get_user_default_capabilities() -> Vec<Capability> {
         // Note: Excluding AI_CREATE_CAPABILITY, AI_UPDATE_CAPABILITY, AI_DELETE_CAPABILITY
         // as these are admin operations for managing AI models
 
+        // SFU capabilities - allow users to join/leave calls
+        #[cfg(feature = "sfu")]
+        RUNTIME_SFU_CALL_CAPABILITY.clone(),
+
         // Note: Excluding RUNTIME_USER_MANAGEMENT_READ_CAPABILITY as it allows listing all users,
         // which is an admin operation. Regular users should not be able to enumerate other users.
+        // Note: Excluding RUNTIME_SFU_MANAGE_CAPABILITY as starting/stopping rooms is an admin operation.
     ]
 }

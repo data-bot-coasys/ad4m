@@ -48,6 +48,8 @@ pub struct MediaRelay {
 const SPEAKING_THRESHOLD: f64 = 0.01;
 /// Time after last audio before a participant is no longer considered speaking
 const SPEAKING_TIMEOUT_MS: u128 = 500;
+/// Approximate size of a "full energy" Opus packet for normalization
+const OPUS_FULL_ENERGY_SIZE: f64 = 200.0;
 
 impl MediaRelay {
     pub fn new() -> Self {
@@ -68,7 +70,7 @@ impl MediaRelay {
         let energy = if data.data.len() > 2 {
             // Opus silence packets are very small (typically 1-3 bytes)
             // Larger packets generally indicate voice activity
-            let size_energy = (data.data.len() as f64 / 200.0).min(1.0);
+            let size_energy = (data.data.len() as f64 / OPUS_FULL_ENERGY_SIZE).min(1.0);
             size_energy
         } else {
             0.0

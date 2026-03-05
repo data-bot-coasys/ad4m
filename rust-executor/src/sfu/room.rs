@@ -166,6 +166,8 @@ impl fmt::Display for RoomError {
     }
 }
 
+impl std::error::Error for RoomError {}
+
 /// Manages all active rooms.
 #[derive(Debug, Default)]
 pub struct RoomManager {

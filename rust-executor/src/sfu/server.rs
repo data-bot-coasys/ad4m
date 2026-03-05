@@ -325,7 +325,11 @@ impl SfuServer {
                             }
                         }
                         Err(e) => {
-                            error!("SFU: UDP recv error: {:?}", e);
+                            if e.kind() == std::io::ErrorKind::WouldBlock {
+                                // Non-blocking mode, expected
+                            } else {
+                                error!("SFU: UDP recv error: {:?}", e);
+                            }
                         }
                     }
                 }

@@ -48,6 +48,19 @@ pub mod types {
         pub event_type: String, // "joined" | "left"
     }
 
+    impl crate::graphql::graphql_types::GetValue for CallParticipantEvent {
+        type Value = CallParticipantEvent;
+        fn get_value(&self) -> Self::Value {
+            self.clone()
+        }
+    }
+
+    impl crate::graphql::graphql_types::GetFilter for CallParticipantEvent {
+        fn get_filter(&self) -> Option<String> {
+            Some(self.room_id.clone())
+        }
+    }
+
     /// Stream add/remove event for subscriptions.
     #[derive(GraphQLObject, Debug, Clone, serde::Serialize, serde::Deserialize)]
     pub struct CallStreamEvent {
@@ -55,5 +68,18 @@ pub mod types {
         pub agent_did: String,
         pub track_kind: String, // "audio" | "video"
         pub event_type: String, // "added" | "removed"
+    }
+
+    impl crate::graphql::graphql_types::GetValue for CallStreamEvent {
+        type Value = CallStreamEvent;
+        fn get_value(&self) -> Self::Value {
+            self.clone()
+        }
+    }
+
+    impl crate::graphql::graphql_types::GetFilter for CallStreamEvent {
+        fn get_filter(&self) -> Option<String> {
+            Some(self.room_id.clone())
+        }
     }
 }

@@ -992,9 +992,11 @@ impl Query {
     // ---- SFU queries ----
 
     #[cfg(feature = "sfu")]
-    async fn sfu_rooms(_context: &RequestContext) -> FieldResult<Vec<crate::sfu::graphql_types::types::SfuRoomGql>> {
+    async fn sfu_rooms(context: &RequestContext) -> FieldResult<Vec<crate::sfu::graphql_types::types::SfuRoomGql>> {
         use crate::sfu::graphql_types::types::*;
         use crate::sfu::get_sfu_service;
+
+        check_capability(&context.capabilities, &RUNTIME_SFU_READ_CAPABILITY)?;
 
         let service = get_sfu_service()
             .ok_or_else(|| FieldError::new("SFU service not available", Value::null()))?;
@@ -1015,10 +1017,12 @@ impl Query {
 
     #[cfg(feature = "sfu")]
     async fn sfu_peer_for_neighbourhood(
-        _context: &RequestContext,
+        context: &RequestContext,
         neighbourhood_url: String,
     ) -> FieldResult<Option<String>> {
         use crate::sfu::get_sfu_service;
+
+        check_capability(&context.capabilities, &RUNTIME_SFU_READ_CAPABILITY)?;
 
         let service = get_sfu_service()
             .ok_or_else(|| FieldError::new("SFU service not available", Value::null()))?;
@@ -1028,11 +1032,13 @@ impl Query {
 
     #[cfg(feature = "sfu")]
     async fn sfu_config(
-        _context: &RequestContext,
+        context: &RequestContext,
         neighbourhood_url: String,
     ) -> FieldResult<crate::sfu::graphql_types::types::SfuConfigGql> {
         use crate::sfu::graphql_types::types::*;
         use crate::sfu::get_sfu_service;
+
+        check_capability(&context.capabilities, &RUNTIME_SFU_READ_CAPABILITY)?;
 
         let service = get_sfu_service()
             .ok_or_else(|| FieldError::new("SFU service not available", Value::null()))?;

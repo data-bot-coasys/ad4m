@@ -2983,12 +2983,14 @@ impl Mutation {
 
     #[cfg(feature = "sfu")]
     async fn sfu_start_room(
-        _context: &RequestContext,
+        context: &RequestContext,
         neighbourhood_url: String,
         room_id: String,
     ) -> FieldResult<crate::sfu::graphql_types::types::SfuRoomGql> {
         use crate::sfu::graphql_types::types::*;
         use crate::sfu::get_sfu_service;
+
+        check_capability(&context.capabilities, &RUNTIME_SFU_MANAGE_CAPABILITY)?;
 
         let service = get_sfu_service()
             .ok_or_else(|| FieldError::new("SFU service not available", Value::null()))?;
@@ -3011,11 +3013,13 @@ impl Mutation {
 
     #[cfg(feature = "sfu")]
     async fn sfu_stop_room(
-        _context: &RequestContext,
+        context: &RequestContext,
         neighbourhood_url: String,
         room_id: String,
     ) -> FieldResult<bool> {
         use crate::sfu::get_sfu_service;
+
+        check_capability(&context.capabilities, &RUNTIME_SFU_MANAGE_CAPABILITY)?;
 
         let service = get_sfu_service()
             .ok_or_else(|| FieldError::new("SFU service not available", Value::null()))?;
@@ -3026,7 +3030,7 @@ impl Mutation {
 
     #[cfg(feature = "sfu")]
     async fn call_join(
-        _context: &RequestContext,
+        context: &RequestContext,
         neighbourhood_url: String,
         room_id: String,
         sdp_offer: String,
@@ -3034,14 +3038,16 @@ impl Mutation {
         use crate::sfu::graphql_types::types::*;
         use crate::sfu::get_sfu_service;
 
+        check_capability(&context.capabilities, &RUNTIME_SFU_CALL_CAPABILITY)?;
+
         let service = get_sfu_service()
             .ok_or_else(|| FieldError::new("SFU service not available", Value::null()))?;
 
-        // Get the agent DID from the agent service
+        // Get the agent DID from the request context
         let agent_did = crate::agent::did();
 
         // TODO: Verify neighbourhood membership via the perspective/neighbourhood system
-        // For now, trust the caller if they have a valid agent DID
+        // For now, trust the caller if they have a valid agent DID and capability
         let is_member = true;
 
         let session = service.call_join(
@@ -3062,11 +3068,13 @@ impl Mutation {
 
     #[cfg(feature = "sfu")]
     async fn call_leave(
-        _context: &RequestContext,
+        context: &RequestContext,
         neighbourhood_url: String,
         room_id: String,
     ) -> FieldResult<bool> {
         use crate::sfu::get_sfu_service;
+
+        check_capability(&context.capabilities, &RUNTIME_SFU_CALL_CAPABILITY)?;
 
         let service = get_sfu_service()
             .ok_or_else(|| FieldError::new("SFU service not available", Value::null()))?;
@@ -3079,7 +3087,7 @@ impl Mutation {
 
     #[cfg(feature = "sfu")]
     async fn sfu_set_config(
-        _context: &RequestContext,
+        context: &RequestContext,
         neighbourhood_url: String,
         mode: String,
         designated_peer: Option<String>,
@@ -3088,14 +3096,24 @@ impl Mutation {
     ) -> FieldResult<bool> {
         use crate::sfu::get_sfu_service;
 
+        check_capability(&context.capabilities, &RUNTIME_SFU_MANAGE_CAPABILITY)?;
+
         let service = get_sfu_service()
             .ok_or_else(|| FieldError::new("SFU service not available", Value::null()))?;
+
+        // Validate and clamp max_mesh_participants to avoid negative/overflow issues
+        let max_mesh = match max_mesh_participants {
+            Some(v) if v < 2 => 2u32,
+            Some(v) if v > 20 => 20u32,
+            Some(v) => v as u32,
+            None => 4u32,
+        };
 
         let config = crate::sfu::SfuConfig {
             mode,
             designated_peer,
             fallback: fallback.unwrap_or_else(|| "mesh".to_string()),
-            max_mesh_participants: max_mesh_participants.unwrap_or(4) as u32,
+            max_mesh_participants: max_mesh,
         };
 
         service.set_config(&neighbourhood_url, config).await
