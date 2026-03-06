@@ -8,10 +8,10 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::Instant;
 
-use log::{debug, info, warn};
+use log::info;
 use str0m::change::SdpOffer;
-use str0m::media::{MediaData, MediaKind, Mid};
-use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc};
+use str0m::media::{MediaKind, Mid};
+use str0m::{Candidate, Rtc};
 
 use super::room::RoomId;
 
@@ -284,39 +284,6 @@ impl CascadeManager {
         Ok(())
     }
 
-    /// Forward media data to all pipe transports for a room, excluding the origin node.
-    pub fn forward_to_pipes(
-        &mut self,
-        room_id: &str,
-        data: &MediaData,
-        exclude_node: Option<&str>,
-    ) {
-        for ((pipe_room, pipe_did), pipe) in self.pipes.iter_mut() {
-            if pipe_room != room_id {
-                continue;
-            }
-            if let Some(exclude) = exclude_node {
-                if pipe_did == exclude {
-                    continue; // Don't forward back to origin SFU node
-                }
-            }
-            let rtc = match pipe.rtc.as_mut() {
-                Some(rtc) if pipe.established && rtc.is_alive() => rtc,
-                _ => continue,
-            };
-
-            // Find matching outgoing track on the pipe
-            for (&out_mid, _) in &pipe.tracks_out {
-                if let Some(writer) = rtc.writer(out_mid) {
-                    if let Err(e) = writer.write(data.network_time, data.time, &data.data) {
-                        debug!("Failed to forward to pipe {}: {:?}", pipe_did, e);
-                    }
-                    break;
-                }
-            }
-        }
-    }
-
     /// Remove an SFU node from the cluster (handles sfu-leave).
     pub fn remove_node(&mut self, did: &str) {
         // Remove from known nodes
@@ -400,6 +367,113 @@ mod tests {
 
     fn test_addr(port: u16) -> SocketAddr {
         format!("127.0.0.1:{}", port).parse().unwrap()
+    }
+
+    #[test]
+    fn test_cascade_manager_initialization() {
+        let mgr = CascadeManager::new("did:key:local".into(), test_addr(10000), 8);
+        assert_eq!(mgr.local_did, "did:key:local");
+        assert!(mgr.known_nodes.is_empty());
+        assert!(mgr.pipes.is_empty());
+        assert!(!mgr.is_cascaded("test-room"));
+    }
+
+    #[test]
+    fn test_cascade_multiple_rooms() {
+        let mut mgr = CascadeManager::new("did:key:local".into(), test_addr(10001), 8);
+        let room_a = RoomId::new("test-nh", "roomA");
+        let room_b = RoomId::new("test-nh", "roomB");
+
+        mgr.handle_sfu_announce("did:key:node1".into(), room_a.to_string(), 1, 8);
+        mgr.handle_sfu_announce("did:key:node2".into(), room_b.to_string(), 2, 8);
+        mgr.handle_sfu_announce("did:key:node3".into(), room_a.to_string(), 3, 8);
+
+        let nodes_a = mgr.nodes_for_room(&room_a.to_string());
+        let nodes_b = mgr.nodes_for_room(&room_b.to_string());
+
+        assert_eq!(nodes_a.len(), 2);
+        assert_eq!(nodes_b.len(), 1);
+        assert!(nodes_a.iter().any(|n| n.did == "did:key:node1"));
+        assert!(nodes_a.iter().any(|n| n.did == "did:key:node3"));
+        assert_eq!(nodes_b[0].did, "did:key:node2");
+    }
+
+    #[test]
+    fn test_cascade_node_capacity_update() {
+        let mut mgr = CascadeManager::new("did:key:local".into(), test_addr(10002), 8);
+        let room_id = RoomId::new("test-nh", "room1");
+
+        mgr.handle_sfu_announce("did:key:nodeX".into(), room_id.to_string(), 2, 8);
+        mgr.handle_sfu_announce("did:key:nodeX".into(), room_id.to_string(), 5, 8);
+
+        let nodes = mgr.nodes_for_room(&room_id.to_string());
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].participant_count, 5);
+    }
+
+    #[test]
+    fn test_cascade_take_rtc() {
+        let mut node_a = CascadeManager::new("did:key:nodeA".into(), test_addr(10003), 8);
+        let mut node_b = CascadeManager::new("did:key:nodeB".into(), test_addr(10004), 8);
+        let room_id = RoomId::new("test-nh", "room1");
+
+        let offer_signal = node_a.establish_pipe("did:key:nodeB", &room_id).unwrap();
+        let sdp_offer = match offer_signal {
+            CascadeSignal::PipeOffer { sdp_offer, .. } => sdp_offer,
+            _ => panic!("Expected PipeOffer"),
+        };
+        let answer_signal = node_b.handle_pipe_offer("did:key:nodeA", &room_id.to_string(), &sdp_offer).unwrap();
+        let sdp_answer = match answer_signal {
+            CascadeSignal::PipeAnswer { sdp_answer, .. } => sdp_answer,
+            _ => panic!("Expected PipeAnswer"),
+        };
+        node_a.handle_pipe_answer("did:key:nodeB", &room_id.to_string(), &sdp_answer).unwrap();
+
+        let rtc = node_a.take_pipe_rtc(&room_id.to_string(), "did:key:nodeB");
+        assert!(rtc.is_some());
+        let rtc_again = node_a.take_pipe_rtc(&room_id.to_string(), "did:key:nodeB");
+        assert!(rtc_again.is_none());
+
+        let pipe_key = (room_id.to_string(), "did:key:nodeB".to_string());
+        let pipe = node_a.pipes.get(&pipe_key).unwrap();
+        assert!(pipe.rtc.is_none());
+    }
+
+    #[test]
+    fn test_cascade_multiple_pipe_transports() {
+        let mut node_a = CascadeManager::new("did:key:nodeA".into(), test_addr(10005), 8);
+        let mut node_b = CascadeManager::new("did:key:nodeB".into(), test_addr(10006), 8);
+        let mut node_c = CascadeManager::new("did:key:nodeC".into(), test_addr(10007), 8);
+        let mut node_d = CascadeManager::new("did:key:nodeD".into(), test_addr(10008), 8);
+        let room_id = RoomId::new("test-nh", "room1");
+
+        for (remote, remote_mgr) in [
+            ("did:key:nodeB", &mut node_b),
+            ("did:key:nodeC", &mut node_c),
+            ("did:key:nodeD", &mut node_d),
+        ] {
+            let offer_signal = node_a.establish_pipe(remote, &room_id).unwrap();
+            let sdp_offer = match offer_signal {
+                CascadeSignal::PipeOffer { sdp_offer, .. } => sdp_offer,
+                _ => panic!("Expected PipeOffer"),
+            };
+            let answer_signal = remote_mgr.handle_pipe_offer("did:key:nodeA", &room_id.to_string(), &sdp_offer).unwrap();
+            let sdp_answer = match answer_signal {
+                CascadeSignal::PipeAnswer { sdp_answer, .. } => sdp_answer,
+                _ => panic!("Expected PipeAnswer"),
+            };
+            node_a.handle_pipe_answer(remote, &room_id.to_string(), &sdp_answer).unwrap();
+        }
+
+        assert_eq!(node_a.pipes.len(), 3);
+
+        node_a.remove_node("did:key:nodeC");
+        assert_eq!(node_a.pipes.len(), 2);
+        assert!(node_a.pipes.keys().all(|(_, did)| did != "did:key:nodeC"));
+
+        node_a.remove_node("did:key:nodeB");
+        node_a.remove_node("did:key:nodeD");
+        assert!(node_a.pipes.is_empty());
     }
 
     #[test]
