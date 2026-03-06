@@ -359,6 +359,40 @@ export class NeighbourhoodClient {
         return sfuRooms
     }
 
+    async sfuPeersForNeighbourhood(neighbourhoodUrl: string): Promise<string[]> {
+        const { sfuPeersForNeighbourhood } = unwrapApolloResult(await this.#apolloClient.query({
+            query: gql`query sfuPeersForNeighbourhood($neighbourhoodUrl: String!) {
+                sfuPeersForNeighbourhood(neighbourhoodUrl: $neighbourhoodUrl)
+            }`,
+            variables: { neighbourhoodUrl }
+        }))
+        return sfuPeersForNeighbourhood
+    }
+
+    async sfuAnnounce(neighbourhoodUrl: string, roomId: string): Promise<boolean> {
+        const { sfuAnnounce } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation sfuAnnounce($neighbourhoodUrl: String!, $roomId: String!) {
+                sfuAnnounce(neighbourhoodUrl: $neighbourhoodUrl, roomId: $roomId)
+            }`,
+            variables: { neighbourhoodUrl, roomId }
+        }))
+        return sfuAnnounce
+    }
+
+    async sfuNodesForRoom(neighbourhoodUrl: string, roomId: string): Promise<SfuNode[]> {
+        const { sfuNodesForRoom } = unwrapApolloResult(await this.#apolloClient.query({
+            query: gql`query sfuNodesForRoom($neighbourhoodUrl: String!, $roomId: String!) {
+                sfuNodesForRoom(neighbourhoodUrl: $neighbourhoodUrl, roomId: $roomId) {
+                    did
+                    participantCount
+                    capacityHint
+                }
+            }`,
+            variables: { neighbourhoodUrl, roomId }
+        }))
+        return sfuNodesForRoom
+    }
+
     async sfuPeerForNeighbourhood(neighbourhoodUrl: string): Promise<string | null> {
         const { sfuPeerForNeighbourhood } = unwrapApolloResult(await this.#apolloClient.query({
             query: gql`query sfuPeerForNeighbourhood($neighbourhoodUrl: String!) {
@@ -375,8 +409,10 @@ export class NeighbourhoodClient {
                 sfuConfig(neighbourhoodUrl: $neighbourhoodUrl) {
                     mode
                     designatedPeer
+                    sfuPeers
                     fallback
                     maxMeshParticipants
+                    maxParticipantsPerNode
                 }
             }`,
             variables: { neighbourhoodUrl }
@@ -390,23 +426,29 @@ export class NeighbourhoodClient {
                 $neighbourhoodUrl: String!,
                 $mode: String!,
                 $designatedPeer: String,
+                $sfuPeers: [String!],
                 $fallback: String,
-                $maxMeshParticipants: Int
+                $maxMeshParticipants: Int,
+                $maxParticipantsPerNode: Int
             ) {
                 sfuSetConfig(
                     neighbourhoodUrl: $neighbourhoodUrl,
                     mode: $mode,
                     designatedPeer: $designatedPeer,
+                    sfuPeers: $sfuPeers,
                     fallback: $fallback,
-                    maxMeshParticipants: $maxMeshParticipants
+                    maxMeshParticipants: $maxMeshParticipants,
+                    maxParticipantsPerNode: $maxParticipantsPerNode
                 )
             }`,
             variables: {
                 neighbourhoodUrl,
                 mode: config.mode || "mesh",
                 designatedPeer: config.designatedPeer,
+                sfuPeers: config.sfuPeers,
                 fallback: config.fallback,
                 maxMeshParticipants: config.maxMeshParticipants,
+                maxParticipantsPerNode: config.maxParticipantsPerNode,
             }
         }))
         return sfuSetConfig
@@ -436,8 +478,16 @@ export interface CallSession {
 }
 
 export interface SfuConfig {
-    mode: "gateway" | "designated" | "mesh"
+    mode: "gateway" | "designated" | "mesh" | "cascaded"
     designatedPeer: string | null
+    sfuPeers: string[]
     fallback: string
     maxMeshParticipants: number
+    maxParticipantsPerNode: number | null
+}
+
+export interface SfuNode {
+    did: string
+    participantCount: number
+    capacityHint: number
 }

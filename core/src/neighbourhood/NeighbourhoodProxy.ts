@@ -1,7 +1,7 @@
 import { DID } from "../DID";
 import { OnlineAgent } from "../language/Language";
 import { Perspective, PerspectiveExpression, PerspectiveUnsignedInput } from "../perspectives/Perspective";
-import { NeighbourhoodClient, SfuRoom, CallSession, SfuConfig } from "./NeighbourhoodClient";
+import { NeighbourhoodClient, SfuRoom, CallSession, SfuConfig, SfuNode } from "./NeighbourhoodClient";
 
 export class NeighbourhoodProxy {
     #client: NeighbourhoodClient
@@ -81,6 +81,21 @@ export class NeighbourhoodProxy {
     async sfuPeer(): Promise<string | null> {
         const url = await this.#getNeighbourhoodUrl()
         return await this.#client.sfuPeerForNeighbourhood(url)
+    }
+
+    async sfuPeers(): Promise<string[]> {
+        const url = await this.#getNeighbourhoodUrl()
+        return await this.#client.sfuPeersForNeighbourhood(url)
+    }
+
+    async sfuAnnounce(roomId: string): Promise<boolean> {
+        const url = await this.#getNeighbourhoodUrl()
+        return await this.#client.sfuAnnounce(url, roomId)
+    }
+
+    async sfuNodesForRoom(roomId: string): Promise<SfuNode[]> {
+        const url = await this.#getNeighbourhoodUrl()
+        return await this.#client.sfuNodesForRoom(url, roomId)
     }
 
     async sfuConfig(): Promise<SfuConfig> {
