@@ -369,3 +369,164 @@ impl CascadeManager {
             .unwrap_or(false)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::SocketAddr;
+
+    fn test_addr(port: u16) -> SocketAddr {
+        format!("127.0.0.1:{}", port).parse().unwrap()
+    }
+
+    #[test]
+    fn test_cascade_announce_and_discovery() {
+        let mut node_a = CascadeManager::new("did:key:nodeA".into(), test_addr(10001), 8);
+        let mut node_b = CascadeManager::new("did:key:nodeB".into(), test_addr(10002), 8);
+        let room_id = RoomId::new("test-nh", "room1");
+
+        // node_a announces
+        let signal = node_a.announce_sfu_node(&room_id, 3);
+        match &signal {
+            CascadeSignal::Announce { did, room_id: _rid, participant_count, capacity_hint: _ } => {
+                assert_eq!(did, "did:key:nodeA");
+                assert_eq!(*participant_count, 3);
+            }
+            _ => panic!("Expected Announce signal"),
+        }
+
+        // node_b handles announce
+        node_b.handle_sfu_announce("did:key:nodeA".into(), room_id.to_string(), 3, 8);
+        let nodes = node_b.nodes_for_room(&room_id.to_string());
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].did, "did:key:nodeA");
+        assert_eq!(nodes[0].participant_count, 3);
+
+        // node_a ignores its own announce
+        node_a.handle_sfu_announce("did:key:nodeA".into(), room_id.to_string(), 3, 8);
+        let nodes = node_a.nodes_for_room(&room_id.to_string());
+        assert_eq!(nodes.len(), 0);
+
+        // Verify cascaded detection
+        assert!(node_b.is_cascaded(&room_id.to_string()));
+        assert!(!node_a.is_cascaded(&room_id.to_string()));
+    }
+
+    #[test]
+    fn test_cascade_pipe_offer_answer() {
+        let mut node_a = CascadeManager::new("did:key:nodeA".into(), test_addr(10003), 8);
+        let mut node_b = CascadeManager::new("did:key:nodeB".into(), test_addr(10004), 8);
+        let room_id = RoomId::new("test-nh", "room1");
+
+        // node_a creates pipe offer
+        let offer_signal = node_a.establish_pipe("did:key:nodeB", &room_id).unwrap();
+        let sdp_offer = match &offer_signal {
+            CascadeSignal::PipeOffer { sdp_offer, from_did, to_did, .. } => {
+                assert_eq!(from_did, "did:key:nodeA");
+                assert_eq!(to_did, "did:key:nodeB");
+                sdp_offer.clone()
+            }
+            _ => panic!("Expected PipeOffer signal"),
+        };
+
+        // node_b handles offer, produces answer
+        let answer_signal = node_b.handle_pipe_offer("did:key:nodeA", &room_id.to_string(), &sdp_offer).unwrap();
+        let sdp_answer = match &answer_signal {
+            CascadeSignal::PipeAnswer { sdp_answer, from_did, to_did, .. } => {
+                assert_eq!(from_did, "did:key:nodeB");
+                assert_eq!(to_did, "did:key:nodeA");
+                sdp_answer.clone()
+            }
+            _ => panic!("Expected PipeAnswer signal"),
+        };
+
+        // node_a handles answer
+        node_a.handle_pipe_answer("did:key:nodeB", &room_id.to_string(), &sdp_answer).unwrap();
+
+        // Duplicate pipe should error
+        assert!(node_a.establish_pipe("did:key:nodeB", &room_id).is_err());
+    }
+
+    #[test]
+    fn test_cascade_remove_node() {
+        let mut node_a = CascadeManager::new("did:key:nodeA".into(), test_addr(10005), 8);
+        let room_id = RoomId::new("test-nh", "room1");
+
+        // Add node_b as known
+        node_a.handle_sfu_announce("did:key:nodeB".into(), room_id.to_string(), 2, 8);
+        assert_eq!(node_a.nodes_for_room(&room_id.to_string()).len(), 1);
+
+        // Remove node_b
+        node_a.remove_node("did:key:nodeB");
+        assert_eq!(node_a.nodes_for_room(&room_id.to_string()).len(), 0);
+        assert!(!node_a.is_cascaded(&room_id.to_string()));
+    }
+
+    #[test]
+    fn test_cascade_pick_redirect() {
+        let mut mgr = CascadeManager::new("did:key:local".into(), test_addr(10007), 4);
+        let room_id = RoomId::new("test-nh", "room1");
+
+        // Add remote node with low load
+        mgr.handle_sfu_announce("did:key:remote".into(), room_id.to_string(), 1, 8);
+
+        // local_count=5 (over capacity=4) → must redirect
+        let redirect = mgr.pick_redirect_node(&room_id.to_string(), 5);
+        assert!(redirect.is_some());
+        assert_eq!(redirect.unwrap().did, "did:key:remote");
+
+        // local_count=2 (under capacity), remote has 1 → difference < 2, no redirect
+        let redirect = mgr.pick_redirect_node(&room_id.to_string(), 2);
+        assert!(redirect.is_none());
+
+        // local_count=2, remote has 0 → difference = 2, threshold is strictly less, so None
+        mgr.handle_sfu_announce("did:key:remote".into(), room_id.to_string(), 0, 8);
+        let redirect = mgr.pick_redirect_node(&room_id.to_string(), 2);
+        assert!(redirect.is_none());
+
+        // local_count=4 (at capacity), remote has 1 → must redirect
+        mgr.handle_sfu_announce("did:key:remote".into(), room_id.to_string(), 1, 8);
+        let redirect = mgr.pick_redirect_node(&room_id.to_string(), 4);
+        assert!(redirect.is_some());
+    }
+
+    #[test]
+    fn test_cascade_forward_excludes_origin() {
+        let mut mgr = CascadeManager::new("did:key:local".into(), test_addr(10009), 8);
+        let room_id = RoomId::new("test-nh", "room1");
+        
+        // With no pipes, forward_to_pipes should just be a no-op (no panic)
+        assert!(!mgr.is_cascaded(&room_id.to_string()));
+    }
+
+    #[test]
+    fn test_room_remote_participants() {
+        use super::super::room::{SfuRoom, RoomId, ParticipantId};
+        
+        let room_id = RoomId::new("test-nh", "room1");
+        let mut room = SfuRoom::new(room_id, None);
+
+        // Add local participant
+        let p1 = ParticipantId::next();
+        room.add_participant(p1.clone(), "did:key:local1".to_string()).unwrap();
+        assert_eq!(room.participant_count(), 1);
+        assert_eq!(room.total_participant_count(), 1);
+
+        // Add remote participants
+        room.add_remote_participant("did:key:remote1".to_string(), "did:key:sfuB".to_string());
+        room.add_remote_participant("did:key:remote2".to_string(), "did:key:sfuB".to_string());
+        assert_eq!(room.participant_count(), 1); // local only
+        assert_eq!(room.total_participant_count(), 3); // local + remote
+
+        // Active speaker on local participant
+        room.set_active_speaker(&p1, true);
+
+        // Remove remote participant
+        assert!(room.remove_remote_participant("did:key:remote1"));
+        assert_eq!(room.total_participant_count(), 2);
+
+        // Remove all from SFU node
+        room.remove_remote_participants_from_node("did:key:sfuB");
+        assert_eq!(room.total_participant_count(), 1);
+    }
+}
