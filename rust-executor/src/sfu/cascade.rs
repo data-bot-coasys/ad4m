@@ -24,15 +24,29 @@ pub struct SfuNodeInfo {
 }
 
 /// A pipe transport — a str0m peer connection to a remote SFU node.
+///
+/// After establishment, the Rtc is extracted via `take_rtc()` and handed
+/// to the SFU server event loop so it gets properly polled. The
+/// PipeTransport then remains as a bookkeeping record (rtc = None).
 pub struct PipeTransport {
     pub remote_did: String,
-    pub rtc: Rtc,
+    /// The str0m Rtc instance. `Some` until `take_rtc()` extracts it for
+    /// the server event loop, then `None`.
+    pub rtc: Option<Rtc>,
     pub room_id: RoomId,
     /// Tracks being received from the remote SFU (mid -> kind)
     pub tracks_in: HashMap<Mid, MediaKind>,
     /// Tracks being sent to the remote SFU (local mid -> source mid)
     pub tracks_out: HashMap<Mid, Mid>,
     pub established: bool,
+}
+
+impl PipeTransport {
+    /// Take ownership of the underlying Rtc so it can be driven in the server event loop.
+    /// After calling this, the PipeTransport is a stub record (no Rtc to drive locally).
+    pub fn take_rtc(&mut self) -> Option<Rtc> {
+        self.rtc.take()
+    }
 }
 
 impl std::fmt::Debug for PipeTransport {
@@ -172,7 +186,7 @@ impl CascadeManager {
 
         let pipe = PipeTransport {
             remote_did: remote_did.to_string(),
-            rtc,
+            rtc: Some(rtc),
             room_id: room_id.clone(),
             tracks_in: HashMap::new(),
             tracks_out: HashMap::new(),
@@ -220,7 +234,7 @@ impl CascadeManager {
 
         let pipe = PipeTransport {
             remote_did: from_did.to_string(),
-            rtc,
+            rtc: Some(rtc),
             room_id: RoomId::new(nh_url, room_name),
             tracks_in: HashMap::new(),
             tracks_out: HashMap::new(),
@@ -251,11 +265,13 @@ impl CascadeManager {
             .get_mut(&pipe_key)
             .ok_or_else(|| "No pending pipe transport for this node".to_string())?;
 
+        let rtc = pipe.rtc.as_mut()
+            .ok_or_else(|| "Pipe transport Rtc already taken".to_string())?;
+
         let answer: str0m::change::SdpAnswer = serde_json::from_str(sdp_answer_json)
             .map_err(|e| format!("Invalid pipe SDP answer: {}", e))?;
 
-        pipe.rtc
-            .sdp_api()
+        rtc.sdp_api()
             .accept_answer(answer)
             .map_err(|e| format!("Failed to accept pipe answer: {}", e))?;
 
@@ -284,13 +300,14 @@ impl CascadeManager {
                     continue; // Don't forward back to origin SFU node
                 }
             }
-            if !pipe.established || !pipe.rtc.is_alive() {
-                continue;
-            }
+            let rtc = match pipe.rtc.as_mut() {
+                Some(rtc) if pipe.established && rtc.is_alive() => rtc,
+                _ => continue,
+            };
 
             // Find matching outgoing track on the pipe
             for (&out_mid, _) in &pipe.tracks_out {
-                if let Some(writer) = pipe.rtc.writer(out_mid) {
+                if let Some(writer) = rtc.writer(out_mid) {
                     if let Err(e) = writer.write(data.network_time, data.time, &data.data) {
                         debug!("Failed to forward to pipe {}: {:?}", pipe_did, e);
                     }
@@ -317,7 +334,9 @@ impl CascadeManager {
 
         for key in keys_to_remove {
             if let Some(mut pipe) = self.pipes.remove(&key) {
-                pipe.rtc.disconnect();
+                if let Some(ref mut rtc) = pipe.rtc {
+                    rtc.disconnect();
+                }
                 info!("Removed pipe transport to SFU node {}", did);
             }
         }
@@ -356,17 +375,21 @@ impl CascadeManager {
             .min_by_key(|n| n.participant_count)
     }
 
-    /// Get mutable access to all pipe transports (for driving in the event loop).
-    pub fn pipes_mut(&mut self) -> impl Iterator<Item = (&(String, String), &mut PipeTransport)> {
-        self.pipes.iter_mut()
-    }
-
     /// Check if we're in cascaded mode for a room (have known peer nodes).
     pub fn is_cascaded(&self, room_id: &str) -> bool {
         self.known_nodes
             .get(room_id)
             .map(|n| !n.is_empty())
             .unwrap_or(false)
+    }
+
+    /// After pipe establishment, extract the Rtc for a given peer so it can be added to the server event loop.
+    pub fn take_pipe_rtc(&mut self, room_id: &str, remote_did: &str) -> Option<Rtc> {
+        let pipe_key = (room_id.to_string(), remote_did.to_string());
+        if let Some(pipe) = self.pipes.get_mut(&pipe_key) {
+            return pipe.take_rtc();
+        }
+        None
     }
 }
 

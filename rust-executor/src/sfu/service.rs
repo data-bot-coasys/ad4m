@@ -522,15 +522,30 @@ impl SfuService {
 
             if matches {
                 // Build a PerspectiveExpression wrapping our cascade signal
+                // Place the signal in a link with source "sfu-cascade" for clean detection
                 let payload = PerspectiveExpression {
                     author: crate::agent::did(),
                     timestamp: chrono::Utc::now().to_rfc3339(),
-                    data: crate::graphql::graphql_types::Perspective {
-                        links: vec![],
+                    data: crate::types::Perspective {
+                        links: vec![crate::types::LinkExpression {
+                            author: crate::agent::did(),
+                            timestamp: chrono::Utc::now().to_rfc3339(),
+                            data: crate::types::Link {
+                                source: "sfu-cascade".to_string(),
+                                target: signal_json.clone(),
+                                predicate: Some("sfu-cascade-signal".to_string()),
+                            }
+                            .normalize(),
+                            proof: crate::types::ExpressionProof {
+                                key: String::new(),
+                                signature: String::new(),
+                            },
+                            status: None,
+                        }],
                     },
                     proof: crate::graphql::graphql_types::DecoratedExpressionProof {
                         key: String::new(),
-                        signature: signal_json.clone(),
+                        signature: String::new(),
                         valid: None,
                         invalid: None,
                     },
@@ -561,12 +576,45 @@ impl SfuService {
             }
             super::cascade::CascadeSignal::PipeOffer { from_did, room_id, sdp_offer, .. } => {
                 let answer_signal = mgr.handle_pipe_offer(&from_did, &room_id, &sdp_offer)?;
+                // Extract the Rtc for the server event loop
+                if let Some(rtc) = mgr.take_pipe_rtc(&room_id, &from_did) {
+                    let (nh_url, room_name) = room_id.split_once(':').unwrap_or((&room_id, "default"));
+                    let pid = ParticipantId::next();
+                    let peer = SfuPeer {
+                        id: pid,
+                        room_id: RoomId::new(nh_url, room_name),
+                        agent_did: from_did.clone(),
+                        rtc,
+                        tracks_in: HashMap::new(),
+                        tracks_out: HashMap::new(),
+                        is_pipe_transport: true,
+                        pipe_remote_did: Some(from_did.clone()),
+                    };
+                    let _ = self.server.command_tx.send(SfuCommand::AddPeer(peer)).await;
+                }
                 let (nh_url, _) = room_id.split_once(':').unwrap_or((&room_id, ""));
                 drop(cascade);
                 self.broadcast_cascade_signal(nh_url, &answer_signal).await
             }
             super::cascade::CascadeSignal::PipeAnswer { from_did, room_id, sdp_answer, .. } => {
-                mgr.handle_pipe_answer(&from_did, &room_id, &sdp_answer)
+                mgr.handle_pipe_answer(&from_did, &room_id, &sdp_answer)?;
+                // Extract the Rtc for the server event loop
+                if let Some(rtc) = mgr.take_pipe_rtc(&room_id, &from_did) {
+                    let (nh_url, room_name) = room_id.split_once(':').unwrap_or((&room_id, "default"));
+                    let pid = ParticipantId::next();
+                    let peer = SfuPeer {
+                        id: pid,
+                        room_id: RoomId::new(nh_url, room_name),
+                        agent_did: from_did.clone(),
+                        rtc,
+                        tracks_in: HashMap::new(),
+                        tracks_out: HashMap::new(),
+                        is_pipe_transport: true,
+                        pipe_remote_did: Some(from_did.clone()),
+                    };
+                    let _ = self.server.command_tx.send(SfuCommand::AddPeer(peer)).await;
+                }
+                Ok(())
             }
             super::cascade::CascadeSignal::Leave { did, .. } => {
                 mgr.remove_node(&did);

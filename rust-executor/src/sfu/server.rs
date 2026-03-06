@@ -18,6 +18,9 @@ use tokio::sync::Mutex;
 use super::relay::MediaRelay;
 use super::room::{ParticipantId, RoomId};
 
+#[cfg(feature = "sfu")]
+use crate::pubsub::{get_global_pubsub_sync, SFU_CALL_PARTICIPANTS_TOPIC, SFU_CALL_STREAMS_TOPIC};
+
 /// A connected WebRTC peer managed by the SFU server.
 #[derive(Debug)]
 pub struct SfuPeer {
@@ -150,7 +153,7 @@ impl SfuServer {
                         let pid = peer.id.clone();
                         let room_id = peer.room_id.clone();
                         let is_pipe = peer.is_pipe_transport;
-                        let pipe_did = peer.pipe_remote_did.clone();
+                        let agent_did_for_event = peer.agent_did.clone();
                         info!(
                             "SFU: peer {} (DID: {}) joined room {}{}",
                             pid, peer.agent_did, room_id,
@@ -161,6 +164,18 @@ impl SfuServer {
                             relay.register_pipe_transport(pid.clone());
                         }
 
+                        // Publish participant joined event (non-pipe only)
+                        if !is_pipe {
+                            let event = super::graphql_types::types::CallParticipantEvent {
+                                room_id: room_id.to_string(),
+                                agent_did: agent_did_for_event,
+                                event_type: "joined".to_string(),
+                            };
+                            if let Ok(json) = serde_json::to_string(&event) {
+                                get_global_pubsub_sync().publish_sync(&SFU_CALL_PARTICIPANTS_TOPIC, &json);
+                            }
+                        }
+
                         // Register existing tracks from other peers as outgoing tracks for the new peer
                         // This will be handled during negotiation
 
@@ -169,6 +184,17 @@ impl SfuServer {
                     Ok(SfuCommand::RemovePeer(pid)) => {
                         if let Some(peer) = peers.remove(&pid) {
                             info!("SFU: peer {} left room {}", pid, peer.room_id);
+                            // Publish participant left event (non-pipe only)
+                            if !peer.is_pipe_transport {
+                                let event = super::graphql_types::types::CallParticipantEvent {
+                                    room_id: peer.room_id.to_string(),
+                                    agent_did: peer.agent_did.clone(),
+                                    event_type: "left".to_string(),
+                                };
+                                if let Ok(json) = serde_json::to_string(&event) {
+                                    get_global_pubsub_sync().publish_sync(&SFU_CALL_PARTICIPANTS_TOPIC, &json);
+                                }
+                            }
                             relay.remove_participant(&pid);
                             quality_preferences.remove(&pid);
                         }
@@ -193,6 +219,16 @@ impl SfuServer {
             peers.retain(|pid, peer| {
                 if !peer.rtc.is_alive() {
                     info!("SFU: peer {} disconnected", pid);
+                    if !peer.is_pipe_transport {
+                        let event = super::graphql_types::types::CallParticipantEvent {
+                            room_id: peer.room_id.to_string(),
+                            agent_did: peer.agent_did.clone(),
+                            event_type: "left".to_string(),
+                        };
+                        if let Ok(json) = serde_json::to_string(&event) {
+                            get_global_pubsub_sync().publish_sync(&SFU_CALL_PARTICIPANTS_TOPIC, &json);
+                        }
+                    }
                     relay.remove_participant(pid);
                     false
                 } else {
@@ -203,7 +239,6 @@ impl SfuServer {
             // Poll all peers for output
             let mut earliest_timeout = Instant::now() + Duration::from_millis(100);
             let mut media_to_relay: Vec<(ParticipantId, MediaData)> = Vec::new();
-            let mut tracks_opened: Vec<(ParticipantId, Mid, MediaKind)> = Vec::new();
             let mut keyframe_requests: Vec<(ParticipantId, KeyframeRequest)> = Vec::new();
 
             for (pid, peer) in peers.iter_mut() {
@@ -238,7 +273,17 @@ impl SfuServer {
                             Event::MediaAdded(e) => {
                                 info!("SFU: peer {} added {:?} track mid={}", pid, e.kind, e.mid);
                                 peer.tracks_in.insert(e.mid, e.kind);
-                                tracks_opened.push((pid.clone(), e.mid, e.kind));
+
+                                // Publish stream event
+                                let stream_event = super::graphql_types::types::CallStreamEvent {
+                                    room_id: peer.room_id.to_string(),
+                                    agent_did: peer.agent_did.clone(),
+                                    track_kind: match e.kind { MediaKind::Audio => "audio", MediaKind::Video => "video" }.to_string(),
+                                    event_type: "added".to_string(),
+                                };
+                                if let Ok(json) = serde_json::to_string(&stream_event) {
+                                    get_global_pubsub_sync().publish_sync(&SFU_CALL_STREAMS_TOPIC, &json);
+                                }
                             }
                             Event::MediaData(data) => {
                                 media_to_relay.push((pid.clone(), data));

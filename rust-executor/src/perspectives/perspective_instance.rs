@@ -826,11 +826,16 @@ impl PerspectiveInstance {
         // Check for SFU cascade signals and route them to the SFU service
         #[cfg(feature = "sfu")]
         {
-            if !signal.proof.signature.is_empty() {
-                if let Ok(cascade_signal) = serde_json::from_str::<crate::sfu::cascade::CascadeSignal>(&signal.proof.signature) {
+            if let Some(link) = signal
+                .data
+                .links
+                .iter()
+                .find(|l| l.data.source == "sfu-cascade")
+            {
+                if let Ok(_cascade_signal) = serde_json::from_str::<crate::sfu::cascade::CascadeSignal>(&link.data.target) {
                     log::debug!("Routing SFU cascade signal from {} to SFU service", signal.author);
                     if let Some(sfu_service) = crate::sfu::get_sfu_service() {
-                        if let Err(e) = sfu_service.handle_cascade_signal(&signal.proof.signature).await {
+                        if let Err(e) = sfu_service.handle_cascade_signal(&link.data.target).await {
                             log::warn!("Failed to handle SFU cascade signal: {}", e);
                         }
                     }
