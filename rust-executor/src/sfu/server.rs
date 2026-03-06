@@ -194,6 +194,19 @@ impl SfuServer {
                                 if let Ok(json) = serde_json::to_string(&event) {
                                     get_global_pubsub_sync().publish_sync(&SFU_CALL_PARTICIPANTS_TOPIC, &json);
                                 }
+
+                                // Publish stream removed events for all tracks from this peer
+                                for kind in peer.tracks_in.values() {
+                                    let stream_event = super::graphql_types::types::CallStreamEvent {
+                                        room_id: peer.room_id.to_string(),
+                                        agent_did: peer.agent_did.clone(),
+                                        track_kind: match kind { MediaKind::Audio => "audio", MediaKind::Video => "video" }.to_string(),
+                                        event_type: "removed".to_string(),
+                                    };
+                                    if let Ok(json) = serde_json::to_string(&stream_event) {
+                                        get_global_pubsub_sync().publish_sync(&SFU_CALL_STREAMS_TOPIC, &json);
+                                    }
+                                }
                             }
                             relay.remove_participant(&pid);
                             quality_preferences.remove(&pid);
@@ -227,6 +240,18 @@ impl SfuServer {
                         };
                         if let Ok(json) = serde_json::to_string(&event) {
                             get_global_pubsub_sync().publish_sync(&SFU_CALL_PARTICIPANTS_TOPIC, &json);
+                        }
+                        // Publish stream removed events for all tracks from this peer
+                        for kind in peer.tracks_in.values() {
+                            let stream_event = super::graphql_types::types::CallStreamEvent {
+                                room_id: peer.room_id.to_string(),
+                                agent_did: peer.agent_did.clone(),
+                                track_kind: match kind { MediaKind::Audio => "audio", MediaKind::Video => "video" }.to_string(),
+                                event_type: "removed".to_string(),
+                            };
+                            if let Ok(json) = serde_json::to_string(&stream_event) {
+                                get_global_pubsub_sync().publish_sync(&SFU_CALL_STREAMS_TOPIC, &json);
+                            }
                         }
                     }
                     relay.remove_participant(pid);

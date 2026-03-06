@@ -93,7 +93,8 @@ impl MediaRelay {
     }
 
     /// Determine the current active speaker.
-    fn update_active_speaker(&mut self) {
+    #[cfg_attr(test, allow(dead_code))]
+    pub(crate) fn update_active_speaker(&mut self) {
         let now = Instant::now();
         let mut best: Option<(ParticipantId, f64)> = None;
 
