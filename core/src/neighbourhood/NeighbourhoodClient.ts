@@ -328,6 +328,8 @@ export class NeighbourhoodClient {
                     neighbourhoodUrl
                     participantId
                     sdpAnswer
+                    redirectTo
+                    streamMapping
                 }
             }`,
             variables: { neighbourhoodUrl, roomId, sdpOffer }
@@ -343,6 +345,16 @@ export class NeighbourhoodClient {
             variables: { neighbourhoodUrl, roomId }
         }))
         return callLeave
+    }
+
+    async callSetQualityPreference(neighbourhoodUrl: string, roomId: string, preference: string): Promise<boolean> {
+        const { callSetQualityPreference } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation callSetQualityPreference($neighbourhoodUrl: String!, $roomId: String!, $preference: String!) {
+                callSetQualityPreference(neighbourhoodUrl: $neighbourhoodUrl, roomId: $roomId, preference: $preference)
+            }`,
+            variables: { neighbourhoodUrl, roomId, preference }
+        }))
+        return callSetQualityPreference
     }
 
     async sfuRooms(): Promise<SfuRoom[]> {
@@ -475,6 +487,8 @@ export interface CallSession {
     neighbourhoodUrl: string
     participantId: string
     sdpAnswer: string
+    redirectTo: string | null
+    streamMapping: string[]
 }
 
 export interface SfuConfig {

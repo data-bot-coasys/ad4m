@@ -38,6 +38,12 @@ pub enum SfuCommand {
     AddPeer(SfuPeer),
     /// A peer is leaving (explicit leave or disconnect).
     RemovePeer(ParticipantId),
+    /// Set quality preference for a participant's received video.
+    SetQualityPreference {
+        participant_id: ParticipantId,
+        /// "high", "medium", "low", or "auto"
+        preference: String,
+    },
     /// Shut down the SFU server.
     Shutdown,
 }
@@ -127,6 +133,7 @@ impl SfuServer {
     ) {
         let mut peers: HashMap<ParticipantId, SfuPeer> = HashMap::new();
         let mut relay = MediaRelay::new();
+        let mut quality_preferences: HashMap<ParticipantId, String> = HashMap::new();
         let mut buf = vec![0u8; 2000];
 
         info!("SFU event loop started on {}", local_addr);
@@ -152,7 +159,12 @@ impl SfuServer {
                         if let Some(peer) = peers.remove(&pid) {
                             info!("SFU: peer {} left room {}", pid, peer.room_id);
                             relay.remove_participant(&pid);
+                            quality_preferences.remove(&pid);
                         }
+                    }
+                    Ok(SfuCommand::SetQualityPreference { participant_id, preference }) => {
+                        info!("SFU: peer {} quality preference set to '{}'", participant_id, preference);
+                        quality_preferences.insert(participant_id, preference);
                     }
                     Ok(SfuCommand::Shutdown) => {
                         info!("SFU event loop shutting down");
@@ -253,6 +265,22 @@ impl SfuServer {
                     }
                     if &target_peer.room_id != origin_room {
                         continue;
+                    }
+
+                    // Apply quality preference filtering for video
+                    if data.kind == MediaKind::Video {
+                        if let Some(rid) = &data.rid {
+                            let pref = quality_preferences.get(target_pid).map(|s| s.as_str()).unwrap_or("high");
+                            let rid_str = rid.to_string();
+                            let skip = match pref {
+                                "low" => rid_str != "low" && rid_str != "q",
+                                "medium" => rid_str == "high" || rid_str == "f",
+                                _ => false, // "high" and "auto" forward all
+                            };
+                            if skip {
+                                continue;
+                            }
+                        }
                     }
 
                     // Find the outgoing Mid on the target peer that maps to this origin track

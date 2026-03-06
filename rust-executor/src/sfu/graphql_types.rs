@@ -29,6 +29,11 @@ pub mod types {
         pub neighbourhood_url: String,
         pub participant_id: String,
         pub sdp_answer: String,
+        /// If set, client should disconnect and reconnect to this SFU node's DID instead.
+        pub redirect_to: Option<String>,
+        /// Maps stream IDs to participant DIDs so the client knows who each track belongs to.
+        /// Format: Vec of "streamId:did" pairs.
+        pub stream_mapping: Vec<String>,
     }
 
     /// SFU configuration for a neighbourhood (from Social DNA).

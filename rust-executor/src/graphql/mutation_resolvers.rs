@@ -3063,7 +3063,29 @@ impl Mutation {
             neighbourhood_url: session.neighbourhood_url,
             participant_id: session.participant_id,
             sdp_answer: session.sdp_answer,
+            redirect_to: session.redirect_to,
+            stream_mapping: session.stream_mapping,
         })
+    }
+
+    #[cfg(feature = "sfu")]
+    async fn call_set_quality_preference(
+        context: &RequestContext,
+        neighbourhood_url: String,
+        room_id: String,
+        preference: String,
+    ) -> FieldResult<bool> {
+        use crate::sfu::get_sfu_service;
+
+        check_capability(&context.capabilities, &RUNTIME_SFU_CALL_CAPABILITY)?;
+
+        let service = get_sfu_service()
+            .ok_or_else(|| FieldError::new("SFU service not available", Value::null()))?;
+
+        let agent_did = crate::agent::did();
+
+        service.call_set_quality_preference(&neighbourhood_url, &room_id, &agent_did, &preference).await
+            .map_err(|e| FieldError::new(e, Value::null()))
     }
 
     #[cfg(feature = "sfu")]

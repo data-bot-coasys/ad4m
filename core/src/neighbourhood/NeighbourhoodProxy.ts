@@ -78,6 +78,11 @@ export class NeighbourhoodProxy {
         return await this.#client.callLeave(url, roomId)
     }
 
+    async callSetQualityPreference(roomId: string, preference: string): Promise<boolean> {
+        const url = await this.#getNeighbourhoodUrl()
+        return await this.#client.callSetQualityPreference(url, roomId, preference)
+    }
+
     async sfuPeer(): Promise<string | null> {
         const url = await this.#getNeighbourhoodUrl()
         return await this.#client.sfuPeerForNeighbourhood(url)

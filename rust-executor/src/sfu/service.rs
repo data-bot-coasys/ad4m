@@ -14,6 +14,7 @@ use str0m::change::SdpOffer;
 use str0m::Rtc;
 use tokio::sync::RwLock;
 
+use super::cascade::CascadeManager;
 use super::room::{ParticipantId, ParticipantInfo, RoomError, RoomId, RoomManager, SfuRoom};
 use super::server::{SfuCommand, SfuPeer, SfuServer, SfuServerConfig};
 
@@ -95,6 +96,8 @@ pub struct CallSessionInfo {
     pub neighbourhood_url: String,
     pub participant_id: String,
     pub sdp_answer: String,
+    pub redirect_to: Option<String>,
+    pub stream_mapping: Vec<String>,
 }
 
 /// The global SFU service, analogous to HolochainService.
@@ -103,6 +106,8 @@ pub struct SfuService {
     rooms: Arc<RwLock<RoomManager>>,
     /// Maps neighbourhood URLs to their SFU configuration (from Social DNA).
     configs: Arc<RwLock<HashMap<String, SfuConfig>>>,
+    /// Cascade manager for multi-node SFU deployments.
+    cascade_manager: Arc<RwLock<Option<CascadeManager>>>,
 }
 
 impl SfuService {
@@ -118,6 +123,7 @@ impl SfuService {
             server,
             rooms: Arc::new(RwLock::new(RoomManager::new())),
             configs: Arc::new(RwLock::new(HashMap::new())),
+            cascade_manager: Arc::new(RwLock::new(None)),
         });
 
         SFU_SERVICE
@@ -214,6 +220,27 @@ impl SfuService {
         let room_id = RoomId::new(neighbourhood_url, room_name);
         let pid = ParticipantId::next();
 
+        // Check cascade redirect before accepting the participant
+        {
+            let cascade = self.cascade_manager.read().await;
+            if let Some(ref mgr) = *cascade {
+                let rooms = self.rooms.read().await;
+                let local_count = rooms.get_room(&room_id)
+                    .map(|r| r.participant_count() as u32)
+                    .unwrap_or(0);
+                if let Some(node) = mgr.pick_redirect_node(&room_id.to_string(), local_count) {
+                    return Ok(CallSessionInfo {
+                        room_name: room_name.to_string(),
+                        neighbourhood_url: neighbourhood_url.to_string(),
+                        participant_id: String::new(),
+                        sdp_answer: String::new(),
+                        redirect_to: Some(node.did.clone()),
+                        stream_mapping: Vec::new(),
+                    });
+                }
+            }
+        }
+
         // Ensure room exists
         {
             let mut rooms = self.rooms.write().await;
@@ -254,11 +281,30 @@ impl SfuService {
             .await
             .map_err(|e| format!("Failed to add peer to SFU: {}", e))?;
 
+        // Build stream mapping from existing participants in the room
+        let stream_mapping = {
+            let rooms = self.rooms.read().await;
+            if let Some(room) = rooms.get_room(&room_id) {
+                let mut mapping: Vec<String> = room.participants.values()
+                    .filter(|p| p.id != pid)
+                    .map(|p| format!("{}:{}", p.id.0, p.agent_did))
+                    .collect();
+                for (did, _remote) in &room.remote_participants {
+                    mapping.push(format!("remote-{}:{}", did, did));
+                }
+                mapping
+            } else {
+                Vec::new()
+            }
+        };
+
         Ok(CallSessionInfo {
             room_name: room_name.to_string(),
             neighbourhood_url: neighbourhood_url.to_string(),
             participant_id: pid.to_string(),
             sdp_answer,
+            redirect_to: None,
+            stream_mapping,
         })
     }
 
@@ -297,6 +343,47 @@ impl SfuService {
         if is_empty {
             rooms.destroy_room(&room_id).ok();
         }
+
+        Ok(true)
+    }
+
+    /// Set the quality preference for a participant's received video streams.
+    pub async fn call_set_quality_preference(
+        &self,
+        neighbourhood_url: &str,
+        room_name: &str,
+        agent_did: &str,
+        preference: &str,
+    ) -> Result<bool, String> {
+        // Validate preference
+        match preference {
+            "high" | "medium" | "low" | "auto" => {}
+            other => return Err(format!("Invalid quality preference: '{}'. Must be 'high', 'medium', 'low', or 'auto'", other)),
+        }
+
+        let room_id = RoomId::new(neighbourhood_url, room_name);
+        let rooms = self.rooms.read().await;
+
+        let room = rooms
+            .get_room(&room_id)
+            .ok_or_else(|| RoomError::NotFound.to_string())?;
+
+        // Find participant by DID
+        let pid = room
+            .participants
+            .iter()
+            .find(|(_, p)| p.agent_did == agent_did)
+            .map(|(pid, _)| pid.clone())
+            .ok_or_else(|| "Agent not in room".to_string())?;
+
+        self.server
+            .command_tx
+            .send(SfuCommand::SetQualityPreference {
+                participant_id: pid,
+                preference: preference.to_string(),
+            })
+            .await
+            .map_err(|e| format!("Failed to send quality preference command: {}", e))?;
 
         Ok(true)
     }
