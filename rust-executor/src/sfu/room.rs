@@ -286,6 +286,67 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_remote_participants() {
+        let room_id = RoomId::new("neighbourhood://test", "room1");
+        let mut room = SfuRoom::new(room_id, None);
+
+        let p1 = ParticipantId::next();
+        room.add_participant(p1.clone(), "did:key:local1".to_string()).unwrap();
+
+        room.add_remote_participant("did:key:remote1".to_string(), "did:key:sfu1".to_string());
+        room.add_remote_participant("did:key:remote2".to_string(), "did:key:sfu1".to_string());
+        assert_eq!(room.participant_count(), 1);
+        assert_eq!(room.total_participant_count(), 3);
+
+        assert!(room.remove_remote_participant("did:key:remote1"));
+        assert_eq!(room.total_participant_count(), 2);
+
+        room.remove_remote_participants_from_node("did:key:sfu1");
+        assert_eq!(room.total_participant_count(), 1);
+    }
+
+    #[test]
+    fn test_media_state() {
+        let room_id = RoomId::new("neighbourhood://test", "room1");
+        let mut room = SfuRoom::new(room_id, None);
+        let p1 = ParticipantId::next();
+        room.add_participant(p1.clone(), "did:key:local1".to_string()).unwrap();
+
+        room.set_media_state(&p1, true, false);
+        let participant = room.participants.get(&p1).unwrap();
+        assert!(participant.has_audio);
+        assert!(!participant.has_video);
+
+        room.set_active_speaker(&p1, true);
+        let participant = room.participants.get(&p1).unwrap();
+        assert!(participant.is_active_speaker);
+    }
+
+    #[test]
+    fn test_participant_dids() {
+        let room_id = RoomId::new("neighbourhood://test", "room1");
+        let mut room = SfuRoom::new(room_id, None);
+
+        let p1 = ParticipantId::next();
+        let p2 = ParticipantId::next();
+        let p3 = ParticipantId::next();
+        room.add_participant(p1.clone(), "did:key:one".to_string()).unwrap();
+        room.add_participant(p2.clone(), "did:key:two".to_string()).unwrap();
+        room.add_participant(p3.clone(), "did:key:three".to_string()).unwrap();
+
+        let dids = room.participant_dids();
+        assert_eq!(dids.len(), 3);
+        assert!(dids.contains(&"did:key:one".to_string()));
+        assert!(dids.contains(&"did:key:two".to_string()));
+        assert!(dids.contains(&"did:key:three".to_string()));
+
+        room.remove_participant(&p2);
+        let dids = room.participant_dids();
+        assert_eq!(dids.len(), 2);
+        assert!(!dids.contains(&"did:key:two".to_string()));
+    }
+
+    #[test]
     fn test_room_lifecycle() {
         let mut mgr = RoomManager::new();
         let room_id = RoomId::new("neighbourhood://test", "room1");
@@ -324,6 +385,39 @@ mod tests {
         // Cleanup via manager
         let cleaned = mgr.remove_participant_from_all(&ParticipantId::next());
         // Room was already empty, cleanup happens on remove_participant_from_all
+    }
+
+    #[test]
+    fn test_active_speaker() {
+        let room_id = RoomId::new("neighbourhood://test", "room1");
+        let mut room = SfuRoom::new(room_id, None);
+        let p1 = ParticipantId::next();
+        room.add_participant(p1.clone(), "did:key:speaker".to_string()).unwrap();
+
+        room.set_active_speaker(&p1, true);
+        assert!(room.participants.get(&p1).unwrap().is_active_speaker);
+
+        room.set_active_speaker(&p1, false);
+        assert!(!room.participants.get(&p1).unwrap().is_active_speaker);
+    }
+
+    #[test]
+    fn test_room_manager_multiple_rooms() {
+        let mut mgr = RoomManager::new();
+        let r1 = RoomId::new("nh://a", "room1");
+        let r2 = RoomId::new("nh://a", "room2");
+        let r3 = RoomId::new("nh://b", "room3");
+
+        mgr.create_room(r1.clone(), None).unwrap();
+        mgr.create_room(r2.clone(), None).unwrap();
+        mgr.create_room(r3.clone(), None).unwrap();
+        assert_eq!(mgr.list_rooms().len(), 3);
+
+        mgr.destroy_room(&r2).unwrap();
+        assert_eq!(mgr.list_rooms().len(), 2);
+        assert!(mgr.get_room(&r1).is_some());
+        assert!(mgr.get_room(&r2).is_none());
+        assert!(mgr.get_room(&r3).is_some());
     }
 
     #[test]

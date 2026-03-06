@@ -165,11 +165,133 @@ impl MediaRelay {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ops::RangeInclusive;
+    use std::time::{Duration, Instant};
+    use str0m::media::{MediaData, Mid};
+    use str0m::rtp::{ExtensionValues, MediaTime, Pt, SeqNo};
+    use str0m::format::{Codec, CodecSpec, FormatParams, PayloadParams};
+    use str0m::packet::CodecExtra;
+
+    fn make_audio_data(size: usize) -> MediaData {
+        let pt = Pt::new_with_value(111);
+        let spec = CodecSpec {
+            codec: Codec::Opus,
+            clock_rate: str0m::rtp::Frequency::FORTY_EIGHT_KHZ,
+            channels: Some(2),
+            format: FormatParams::default(),
+        };
+        let params = PayloadParams::new(pt, None, spec);
+        MediaData {
+            mid: Mid::new(),
+            pt,
+            rid: None,
+            params,
+            time: MediaTime::new(0, str0m::rtp::Frequency::FORTY_EIGHT_KHZ),
+            network_time: Instant::now(),
+            seq_range: RangeInclusive::new(SeqNo::from(1u64), SeqNo::from(1u64)),
+            contiguous: true,
+            data: vec![0u8; size],
+            ext_vals: ExtensionValues::default(),
+            codec_extra: CodecExtra::None,
+            last_sender_info: None,
+            audio_start_of_talk_spurt: false,
+        }
+    }
 
     #[test]
     fn test_active_speaker_detection() {
         let relay = MediaRelay::new();
         assert!(relay.active_speaker().is_none());
+    }
+
+    #[test]
+    fn test_voice_activity_detection() {
+        let mut relay = MediaRelay::new();
+        let p1 = ParticipantId::next();
+        let p2 = ParticipantId::next();
+
+        // Silence packet should not trigger speaking
+        let silent = make_audio_data(1);
+        relay.update_voice_activity(&p1, &silent);
+        assert!(!relay.is_speaking(&p1));
+
+        // Larger packet should trigger speaking
+        let loud = make_audio_data(200);
+        relay.update_voice_activity(&p1, &loud);
+        assert!(relay.is_speaking(&p1));
+
+        // Another participant with higher energy becomes active speaker
+        let louder = make_audio_data(400);
+        relay.update_voice_activity(&p2, &louder);
+        assert_eq!(relay.active_speaker(), Some(&p2));
+    }
+
+    #[test]
+    fn test_pipe_transport_registration() {
+        let mut relay = MediaRelay::new();
+        let p1 = ParticipantId::next();
+        relay.register_pipe_transport(p1.clone());
+        assert!(relay.is_pipe_transport(&p1));
+        relay.unregister_pipe_transport(&p1);
+        assert!(!relay.is_pipe_transport(&p1));
+    }
+
+    #[test]
+    fn test_speaking_timeout() {
+        let mut relay = MediaRelay::new();
+        let p1 = ParticipantId::next();
+
+        let loud = make_audio_data(200);
+        relay.update_voice_activity(&p1, &loud);
+        assert!(relay.is_speaking(&p1));
+
+        // Simulate timeout by rewinding last_audio
+        if let Some(state) = relay.voice_activity.get_mut(&p1) {
+            state.last_audio = Instant::now() - Duration::from_millis(SPEAKING_TIMEOUT_MS as u64 + 10);
+        }
+
+        assert!(!relay.is_speaking(&p1));
+    }
+
+    #[test]
+    fn test_multiple_participants_speaking() {
+        let mut relay = MediaRelay::new();
+        let p1 = ParticipantId::next();
+        let p2 = ParticipantId::next();
+        let p3 = ParticipantId::next();
+
+        // Feed varying energy levels
+        let small = make_audio_data(50);
+        let medium = make_audio_data(150);
+        let large = make_audio_data(400);
+
+        relay.update_voice_activity(&p1, &small);
+        relay.update_voice_activity(&p2, &large);
+        relay.update_voice_activity(&p3, &medium);
+
+        // p2 has highest energy → active speaker
+        assert_eq!(relay.active_speaker(), Some(&p2));
+    }
+
+    #[test]
+    fn test_voice_activity_with_direct_state() {
+        let mut relay = MediaRelay::new();
+        let p1 = ParticipantId::next();
+        let p2 = ParticipantId::next();
+
+        relay.voice_activity.insert(p1.clone(), VoiceActivityState {
+            level: 0.8,
+            last_audio: Instant::now(),
+            is_speaking: true,
+        });
+        relay.voice_activity.insert(p2.clone(), VoiceActivityState {
+            level: 0.2,
+            last_audio: Instant::now(),
+            is_speaking: true,
+        });
+
+        relay.update_active_speaker();
+        assert_eq!(relay.active_speaker(), Some(&p1));
     }
 
     #[test]
