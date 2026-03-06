@@ -29,6 +29,10 @@ pub struct SfuPeer {
     pub tracks_in: HashMap<Mid, MediaKind>,
     /// Maps outgoing Mid (media we send to the peer) to the source (origin participant, origin mid)
     pub tracks_out: HashMap<Mid, (ParticipantId, Mid)>,
+    /// If this peer is a pipe transport to another SFU node (not a real participant)
+    pub is_pipe_transport: bool,
+    /// The DID of the remote SFU node (only set for pipe transports)
+    pub pipe_remote_did: Option<String>,
 }
 
 /// Commands sent to the SFU event loop from the GraphQL API / signalling layer.
@@ -145,10 +149,17 @@ impl SfuServer {
                     Ok(SfuCommand::AddPeer(peer)) => {
                         let pid = peer.id.clone();
                         let room_id = peer.room_id.clone();
+                        let is_pipe = peer.is_pipe_transport;
+                        let pipe_did = peer.pipe_remote_did.clone();
                         info!(
-                            "SFU: peer {} (DID: {}) joined room {}",
-                            pid, peer.agent_did, room_id
+                            "SFU: peer {} (DID: {}) joined room {}{}",
+                            pid, peer.agent_did, room_id,
+                            if is_pipe { " [pipe transport]" } else { "" }
                         );
+
+                        if is_pipe {
+                            relay.register_pipe_transport(pid.clone());
+                        }
 
                         // Register existing tracks from other peers as outgoing tracks for the new peer
                         // This will be handled during negotiation
@@ -258,12 +269,22 @@ impl SfuServer {
                     relay.update_voice_activity(origin_pid, data);
                 }
 
+                // Cache origin pipe info before the mutable borrow loop
+                let origin_is_pipe = peers.get(origin_pid).map(|p| p.is_pipe_transport).unwrap_or(false);
+                let origin_pipe_did = peers.get(origin_pid).and_then(|p| p.pipe_remote_did.clone());
+
                 // Forward to all other peers in the same room
                 for (target_pid, target_peer) in peers.iter_mut() {
                     if target_pid == origin_pid {
                         continue;
                     }
                     if &target_peer.room_id != origin_room {
+                        continue;
+                    }
+
+                    // Don't forward media from a pipe back to itself
+                    if origin_is_pipe && target_peer.is_pipe_transport
+                        && target_peer.pipe_remote_did == origin_pipe_did {
                         continue;
                     }
 

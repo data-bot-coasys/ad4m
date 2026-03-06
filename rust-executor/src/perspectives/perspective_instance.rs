@@ -823,6 +823,22 @@ impl PerspectiveInstance {
         signal.verify_signatures();
         let handle = self.persisted.lock().await.clone();
 
+        // Check for SFU cascade signals and route them to the SFU service
+        #[cfg(feature = "sfu")]
+        {
+            if !signal.proof.signature.is_empty() {
+                if let Ok(cascade_signal) = serde_json::from_str::<crate::sfu::cascade::CascadeSignal>(&signal.proof.signature) {
+                    log::debug!("Routing SFU cascade signal from {} to SFU service", signal.author);
+                    if let Some(sfu_service) = crate::sfu::get_sfu_service() {
+                        if let Err(e) = sfu_service.handle_cascade_signal(&signal.proof.signature).await {
+                            log::warn!("Failed to handle SFU cascade signal: {}", e);
+                        }
+                    }
+                    // Still publish normally so other subscribers see it
+                }
+            }
+        }
+
         log::debug!("telepresence_signal_from_link_language: perspective={}, recipient_did={:?}, signal_author={}",
             handle.uuid, recipient_did, signal.author);
 

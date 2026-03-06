@@ -273,6 +273,8 @@ impl SfuService {
             rtc,
             tracks_in: HashMap::new(),
             tracks_out: HashMap::new(),
+            is_pipe_transport: false,
+            pipe_remote_did: None,
         };
 
         self.server
@@ -281,16 +283,18 @@ impl SfuService {
             .await
             .map_err(|e| format!("Failed to add peer to SFU: {}", e))?;
 
-        // Build stream mapping from existing participants in the room
+        // Build stream mapping: list of participant DIDs already in the room
+        // The client correlates tracks to participants via ontrack events and
+        // CallStreamEvent subscriptions
         let stream_mapping = {
             let rooms = self.rooms.read().await;
             if let Some(room) = rooms.get_room(&room_id) {
                 let mut mapping: Vec<String> = room.participants.values()
                     .filter(|p| p.id != pid)
-                    .map(|p| format!("{}:{}", p.id.0, p.agent_did))
+                    .map(|p| p.agent_did.clone())
                     .collect();
                 for (did, _remote) in &room.remote_participants {
-                    mapping.push(format!("remote-{}:{}", did, did));
+                    mapping.push(did.clone());
                 }
                 mapping
             } else {
@@ -419,7 +423,26 @@ impl SfuService {
         }
 
         let mut configs = self.configs.write().await;
-        configs.insert(neighbourhood_url.to_string(), config);
+        let is_cascaded = config.mode == "cascaded";
+        configs.insert(neighbourhood_url.to_string(), config.clone());
+
+        // Initialize or tear down the cascade manager based on mode
+        if is_cascaded {
+            let agent_did = crate::agent::did();
+            let local_addr = self.server.local_addr;
+            let max_per_node = config.max_participants_per_node.unwrap_or(12);
+            let mut cascade = self.cascade_manager.write().await;
+            *cascade = Some(super::cascade::CascadeManager::new(
+                agent_did,
+                local_addr,
+                max_per_node,
+            ));
+            info!("Cascade manager initialized for neighbourhood {}", neighbourhood_url);
+        } else {
+            let mut cascade = self.cascade_manager.write().await;
+            *cascade = None;
+        }
+
         Ok(())
     }
 
@@ -452,6 +475,104 @@ impl SfuService {
     pub async fn shutdown(&self) {
         let _ = self.server.command_tx.send(SfuCommand::Shutdown).await;
         info!("SFU service shut down");
+    }
+
+    // ---- Cascade / multi-node SFU ----
+
+    /// Get SFU nodes for a room from the cascade manager.
+    pub async fn sfu_nodes_for_room(&self, _neighbourhood_url: &str, room_id: &str) -> Vec<super::cascade::SfuNodeInfo> {
+        let cascade = self.cascade_manager.read().await;
+        match &*cascade {
+            Some(mgr) => mgr.nodes_for_room(room_id),
+            None => Vec::new(),
+        }
+    }
+
+    /// Announce this node as an SFU for a room.
+    pub async fn announce_as_sfu_node(&self, neighbourhood_url: &str, room_name: &str) -> Result<(), String> {
+        let room_id = RoomId::new(neighbourhood_url, room_name);
+        let rooms = self.rooms.read().await;
+        let local_count = rooms.get_room(&room_id)
+            .map(|r| r.participant_count() as u32)
+            .unwrap_or(0);
+
+        let signal = {
+            let cascade = self.cascade_manager.read().await;
+            match &*cascade {
+                Some(mgr) => mgr.announce_sfu_node(&room_id, local_count),
+                None => return Err("Cascade manager not initialized — set mode to 'cascaded' first".to_string()),
+            }
+        };
+
+        self.broadcast_cascade_signal(neighbourhood_url, &signal).await
+    }
+
+    /// Broadcast a cascade signal to all peers via neighbourhood telepresence.
+    async fn broadcast_cascade_signal(&self, neighbourhood_url: &str, signal: &super::cascade::CascadeSignal) -> Result<(), String> {
+        use crate::graphql::graphql_types::PerspectiveExpression;
+
+        let signal_json = serde_json::to_string(signal)
+            .map_err(|e| format!("Failed to serialize cascade signal: {}", e))?;
+
+        let perspectives = crate::perspectives::all_perspectives();
+        for perspective in &perspectives {
+            let handle = perspective.persisted.lock().await;
+            let matches = handle.shared_url.as_deref() == Some(neighbourhood_url);
+            drop(handle);
+
+            if matches {
+                // Build a PerspectiveExpression wrapping our cascade signal
+                let payload = PerspectiveExpression {
+                    author: crate::agent::did(),
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    data: crate::graphql::graphql_types::Perspective {
+                        links: vec![],
+                    },
+                    proof: crate::graphql::graphql_types::DecoratedExpressionProof {
+                        key: String::new(),
+                        signature: signal_json.clone(),
+                        valid: None,
+                        invalid: None,
+                    },
+                };
+
+                perspective.send_broadcast(payload, false)
+                    .await
+                    .map_err(|e| format!("Failed to broadcast cascade signal: {}", e))?;
+                return Ok(());
+            }
+        }
+        Err(format!("No perspective found for neighbourhood {}", neighbourhood_url))
+    }
+
+    /// Handle an incoming cascade signal from a peer SFU node.
+    pub async fn handle_cascade_signal(&self, signal_json: &str) -> Result<(), String> {
+        let signal: super::cascade::CascadeSignal = serde_json::from_str(signal_json)
+            .map_err(|e| format!("Invalid cascade signal: {}", e))?;
+
+        let mut cascade = self.cascade_manager.write().await;
+        let mgr = cascade.as_mut()
+            .ok_or("Cascade manager not initialized")?;
+
+        match signal {
+            super::cascade::CascadeSignal::Announce { did, room_id, participant_count, capacity_hint } => {
+                mgr.handle_sfu_announce(did, room_id, participant_count, capacity_hint);
+                Ok(())
+            }
+            super::cascade::CascadeSignal::PipeOffer { from_did, room_id, sdp_offer, .. } => {
+                let answer_signal = mgr.handle_pipe_offer(&from_did, &room_id, &sdp_offer)?;
+                let (nh_url, _) = room_id.split_once(':').unwrap_or((&room_id, ""));
+                drop(cascade);
+                self.broadcast_cascade_signal(nh_url, &answer_signal).await
+            }
+            super::cascade::CascadeSignal::PipeAnswer { from_did, room_id, sdp_answer, .. } => {
+                mgr.handle_pipe_answer(&from_did, &room_id, &sdp_answer)
+            }
+            super::cascade::CascadeSignal::Leave { did, .. } => {
+                mgr.remove_node(&did);
+                Ok(())
+            }
+        }
     }
 
     // ---- Internal helpers ----

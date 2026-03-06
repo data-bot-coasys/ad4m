@@ -3046,9 +3046,14 @@ impl Mutation {
         // Get the agent DID from the request context
         let agent_did = crate::agent::did();
 
-        // TODO: Verify neighbourhood membership via the perspective/neighbourhood system
-        // For now, trust the caller if they have a valid agent DID and capability
-        let is_member = true;
+        // Verify neighbourhood membership: check if a perspective exists with this neighbourhood URL
+        let is_member = {
+            let perspectives = crate::perspectives::all_perspectives();
+            perspectives.iter().any(|p| {
+                let handle = p.persisted.blocking_lock();
+                handle.shared_url.as_deref() == Some(neighbourhood_url.as_str())
+            })
+        };
 
         let session = service.call_join(
             &neighbourhood_url,
@@ -3136,11 +3141,28 @@ impl Mutation {
             designated_peer,
             fallback: fallback.unwrap_or_else(|| "mesh".to_string()),
             max_mesh_participants: max_mesh,
+            sfu_peers: Vec::new(),
+            max_participants_per_node: None,
         };
 
         service.set_config(&neighbourhood_url, config).await
             .map_err(|e| FieldError::new(e, Value::null()))?;
 
+        Ok(true)
+    }
+
+    #[cfg(feature = "sfu")]
+    async fn sfu_announce(
+        context: &RequestContext,
+        neighbourhood_url: String,
+        room_id: String,
+    ) -> FieldResult<bool> {
+        use crate::sfu::get_sfu_service;
+        check_capability(&context.capabilities, &RUNTIME_SFU_CALL_CAPABILITY)?;
+        let service = get_sfu_service()
+            .ok_or_else(|| FieldError::new("SFU service not available", Value::null()))?;
+        service.announce_as_sfu_node(&neighbourhood_url, &room_id).await
+            .map_err(|e| FieldError::new(e, Value::null()))?;
         Ok(true)
     }
 }

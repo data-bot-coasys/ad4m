@@ -1047,9 +1047,42 @@ impl Query {
         Ok(SfuConfigGql {
             mode: config.mode,
             designated_peer: config.designated_peer,
+            sfu_peers: config.sfu_peers,
             fallback: config.fallback,
             max_mesh_participants: config.max_mesh_participants as i32,
+            max_participants_per_node: config.max_participants_per_node.map(|v| v as i32),
         })
+    }
+
+    #[cfg(feature = "sfu")]
+    async fn sfu_peers_for_neighbourhood(
+        context: &RequestContext,
+        neighbourhood_url: String,
+    ) -> FieldResult<Vec<String>> {
+        use crate::sfu::get_sfu_service;
+        check_capability(&context.capabilities, &RUNTIME_SFU_READ_CAPABILITY)?;
+        let service = get_sfu_service()
+            .ok_or_else(|| FieldError::new("SFU service not available", Value::null()))?;
+        Ok(service.sfu_peers_for_neighbourhood(&neighbourhood_url).await)
+    }
+
+    #[cfg(feature = "sfu")]
+    async fn sfu_nodes_for_room(
+        context: &RequestContext,
+        neighbourhood_url: String,
+        room_id: String,
+    ) -> FieldResult<Vec<crate::sfu::graphql_types::types::SfuNodeGql>> {
+        use crate::sfu::graphql_types::types::*;
+        use crate::sfu::get_sfu_service;
+        check_capability(&context.capabilities, &RUNTIME_SFU_READ_CAPABILITY)?;
+        let service = get_sfu_service()
+            .ok_or_else(|| FieldError::new("SFU service not available", Value::null()))?;
+        let nodes = service.sfu_nodes_for_room(&neighbourhood_url, &room_id).await;
+        Ok(nodes.iter().map(|n| SfuNodeGql {
+            did: n.did.clone(),
+            participant_count: n.participant_count as i32,
+            capacity_hint: n.capacity_hint as i32,
+        }).collect())
     }
 }
 
