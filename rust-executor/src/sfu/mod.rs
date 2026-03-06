@@ -11,6 +11,8 @@ pub mod relay;
 #[cfg(feature = "sfu")]
 pub mod room;
 #[cfg(feature = "sfu")]
+pub mod cascade;
+#[cfg(feature = "sfu")]
 pub mod server;
 
 #[cfg(feature = "sfu")]

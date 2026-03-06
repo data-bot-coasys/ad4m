@@ -36,8 +36,18 @@ pub mod types {
     pub struct SfuConfigGql {
         pub mode: String,
         pub designated_peer: Option<String>,
+        pub sfu_peers: Vec<String>,
         pub fallback: String,
         pub max_mesh_participants: i32,
+        pub max_participants_per_node: Option<i32>,
+    }
+
+    /// Information about an SFU node in a cascaded cluster.
+    #[derive(GraphQLObject, Debug, Clone)]
+    pub struct SfuNodeGql {
+        pub did: String,
+        pub participant_count: i32,
+        pub capacity_hint: i32,
     }
 
     /// Participant join/leave event for subscriptions.

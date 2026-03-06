@@ -40,6 +40,12 @@ pub struct SfuConfig {
     /// Maximum participants before mesh is degraded
     #[serde(default = "default_max_mesh")]
     pub max_mesh_participants: u32,
+    /// DIDs of SFU peers in cascaded mode
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sfu_peers: Vec<String>,
+    /// Max participants per SFU node in cascaded mode
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_participants_per_node: Option<u32>,
 }
 
 fn default_mode() -> String {
@@ -59,6 +65,8 @@ impl Default for SfuConfig {
             designated_peer: None,
             fallback: default_fallback(),
             max_mesh_participants: default_max_mesh(),
+            sfu_peers: Vec::new(),
+            max_participants_per_node: None,
         }
     }
 }
@@ -309,10 +317,10 @@ impl SfuService {
     ) -> Result<(), String> {
         // Validate mode
         match config.mode.as_str() {
-            "gateway" | "designated" | "mesh" => {}
+            "gateway" | "designated" | "mesh" | "cascaded" => {}
             other => {
                 return Err(format!(
-                    "Invalid SFU mode: '{}'. Must be 'gateway', 'designated', or 'mesh'",
+                    "Invalid SFU mode: '{}'. Must be 'gateway', 'designated', 'mesh', or 'cascaded'",
                     other
                 ))
             }
@@ -338,6 +346,19 @@ impl SfuService {
                 "gateway" => Some("gateway".to_string()), // Sentinel — caller resolves gateway DID
                 _ => None,
             })
+    }
+
+    /// Get the SFU peer DIDs for a neighbourhood (cascaded mode returns multiple).
+    pub async fn sfu_peers_for_neighbourhood(&self, neighbourhood_url: &str) -> Vec<String> {
+        let configs = self.configs.read().await;
+        match configs.get(neighbourhood_url) {
+            Some(c) if c.mode == "cascaded" => c.sfu_peers.clone(),
+            Some(c) if c.mode == "designated" => {
+                c.designated_peer.iter().cloned().collect()
+            }
+            Some(c) if c.mode == "gateway" => vec!["gateway".to_string()],
+            _ => vec![],
+        }
     }
 
     /// Shut down the SFU service.

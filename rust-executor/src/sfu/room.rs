@@ -58,11 +58,22 @@ pub struct ParticipantInfo {
     pub is_active_speaker: bool,
 }
 
+/// A remote participant connected via a pipe transport from a peer SFU node.
+#[derive(Debug, Clone)]
+pub struct RemoteParticipantInfo {
+    pub agent_did: String,
+    pub origin_sfu_did: String,
+    pub has_audio: bool,
+    pub has_video: bool,
+}
+
 /// A call room managed by the SFU.
 #[derive(Debug)]
 pub struct SfuRoom {
     pub id: RoomId,
     pub participants: HashMap<ParticipantId, ParticipantInfo>,
+    /// Remote participants connected through pipe transports from peer SFU nodes.
+    pub remote_participants: HashMap<String, RemoteParticipantInfo>,
     pub created_at: Instant,
     pub max_participants: Option<usize>,
 }
@@ -72,6 +83,7 @@ impl SfuRoom {
         Self {
             id,
             participants: HashMap::new(),
+            remote_participants: HashMap::new(),
             created_at: Instant::now(),
             max_participants,
         }
@@ -143,6 +155,35 @@ impl SfuRoom {
             p.has_audio = has_audio;
             p.has_video = has_video;
         }
+    }
+
+    /// Add a remote participant (from a peer SFU node).
+    pub fn add_remote_participant(&mut self, agent_did: String, origin_sfu_did: String) {
+        self.remote_participants.insert(
+            agent_did.clone(),
+            RemoteParticipantInfo {
+                agent_did,
+                origin_sfu_did,
+                has_audio: false,
+                has_video: false,
+            },
+        );
+    }
+
+    /// Remove a remote participant.
+    pub fn remove_remote_participant(&mut self, agent_did: &str) -> bool {
+        self.remote_participants.remove(agent_did).is_some()
+    }
+
+    /// Remove all remote participants from a specific SFU node.
+    pub fn remove_remote_participants_from_node(&mut self, sfu_did: &str) {
+        self.remote_participants
+            .retain(|_, p| p.origin_sfu_did != sfu_did);
+    }
+
+    /// Total participant count (local + remote).
+    pub fn total_participant_count(&self) -> usize {
+        self.participants.len() + self.remote_participants.len()
     }
 }
 

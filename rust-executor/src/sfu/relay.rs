@@ -3,7 +3,7 @@
 //! The relay tracks voice activity per participant and provides
 //! active speaker detection based on audio energy levels.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use str0m::media::{MediaData, MediaKind};
@@ -37,11 +37,14 @@ impl Default for VoiceActivityState {
 /// since it needs direct access to the str0m Rtc instances. The relay module
 /// provides the intelligence layer: which participant is the active speaker,
 /// voice activity tracking, etc.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct MediaRelay {
     voice_activity: HashMap<ParticipantId, VoiceActivityState>,
     /// The current active speaker (participant with highest sustained audio level)
     active_speaker: Option<ParticipantId>,
+    /// Set of participant IDs that represent pipe transports (not real users).
+    /// Media from these should not be forwarded back to the originating pipe.
+    pipe_transport_ids: HashSet<ParticipantId>,
 }
 
 /// Threshold for considering a participant as "speaking"
@@ -53,7 +56,11 @@ const OPUS_FULL_ENERGY_SIZE: f64 = 200.0;
 
 impl MediaRelay {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            voice_activity: HashMap::new(),
+            active_speaker: None,
+            pipe_transport_ids: HashSet::new(),
+        }
     }
 
     /// Update voice activity for a participant based on incoming audio data.
@@ -132,10 +139,26 @@ impl MediaRelay {
     /// Remove a participant from voice activity tracking.
     pub fn remove_participant(&mut self, pid: &ParticipantId) {
         self.voice_activity.remove(pid);
+        self.pipe_transport_ids.remove(pid);
         if self.active_speaker.as_ref() == Some(pid) {
             self.active_speaker = None;
             self.update_active_speaker();
         }
+    }
+
+    /// Register a participant ID as a pipe transport endpoint.
+    pub fn register_pipe_transport(&mut self, pid: ParticipantId) {
+        self.pipe_transport_ids.insert(pid);
+    }
+
+    /// Check if a participant ID represents a pipe transport.
+    pub fn is_pipe_transport(&self, pid: &ParticipantId) -> bool {
+        self.pipe_transport_ids.contains(pid)
+    }
+
+    /// Unregister a pipe transport participant.
+    pub fn unregister_pipe_transport(&mut self, pid: &ParticipantId) {
+        self.pipe_transport_ids.remove(pid);
     }
 }
 
