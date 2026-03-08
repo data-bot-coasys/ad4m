@@ -1,0 +1,14 @@
+{
+  "executorUrl": "ws://127.0.0.1:12100/graphql",
+  "token": "hextest123",
+  "wakeUrl": "http://127.0.0.1:18789/hooks/wake",
+  "wakeToken": "f74c408892fb97cfe0f552a1b12bf17fbeab9de03ec15dfd",
+  "debounceMs": 15000,
+  "subscriptions": [
+    {
+      "id": "mcp-test-messages",
+      "perspective": "2c0c9365-de0b-499a-8ec6-f5bbb69dc8b3",
+      "query": "SELECT * FROM link WHERE source = 'literal://string:eduuuhfbcllwprvipxzgbkqq' AND predicate = 'ad4m://has_child'"
+    }
+  ]
+}

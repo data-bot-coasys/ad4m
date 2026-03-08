@@ -322,6 +322,17 @@ impl SfuService {
             }
         };
 
+        // Auto-announce in cascade mode when a participant joins
+        {
+            let cascade = self.cascade_manager.read().await;
+            if cascade.is_some() {
+                drop(cascade);
+                if let Err(e) = self.announce_as_sfu_node(neighbourhood_url, room_name).await {
+                    warn!("Failed to auto-announce cascade: {}", e);
+                }
+            }
+        }
+
         Ok(CallSessionInfo {
             room_name: room_name.to_string(),
             neighbourhood_url: neighbourhood_url.to_string(),
