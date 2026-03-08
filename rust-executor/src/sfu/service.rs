@@ -554,10 +554,10 @@ impl SfuService {
     // ---- Cascade / multi-node SFU ----
 
     /// Get SFU nodes for a room from the cascade manager.
-    pub async fn sfu_nodes_for_room(&self, _neighbourhood_url: &str, room_id: &str) -> Vec<super::cascade::SfuNodeInfo> {
+    pub async fn sfu_nodes_for_room(&self, neighbourhood_url: &str, room_id: &str) -> Vec<super::cascade::SfuNodeInfo> {
         let cascade = self.cascade_manager.read().await;
         match &*cascade {
-            Some(mgr) => mgr.nodes_for_room(room_id),
+            Some(mgr) => { let composite = format!("{}:{}", neighbourhood_url, room_id); mgr.nodes_for_room(&composite) }
             None => Vec::new(),
         }
     }
