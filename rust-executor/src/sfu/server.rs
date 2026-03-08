@@ -197,9 +197,7 @@ impl SfuServer {
                             }
                         }
 
-                        // Register existing tracks from other peers as outgoing tracks for the new peer
-                        // This will be handled during negotiation
-
+                        // tracks_out are set up during SDP creation in call_join
                         peers.insert(pid, peer);
                     }
                     Ok(SfuCommand::RemovePeer(pid)) => {
@@ -285,6 +283,7 @@ impl SfuServer {
             // Poll all peers for output
             let mut earliest_timeout = Instant::now() + Duration::from_millis(100);
             let mut media_to_relay: Vec<(ParticipantId, MediaData)> = Vec::new();
+
             let mut keyframe_requests: Vec<(ParticipantId, KeyframeRequest)> = Vec::new();
 
             for (pid, peer) in peers.iter_mut() {
@@ -319,6 +318,7 @@ impl SfuServer {
                             Event::MediaAdded(e) => {
                                 info!("SFU: peer {} added {:?} track mid={}", pid, e.kind, e.mid);
                                 peer.tracks_in.insert(e.mid, e.kind);
+
 
                                 // Publish stream event
                                 let stream_event = super::graphql_types::types::CallStreamEvent {
@@ -395,20 +395,29 @@ impl SfuServer {
                         }
                     }
 
-                    // Find the outgoing Mid on the target peer that maps to this origin track
-                    if let Some((&out_mid, _)) =
-                        target_peer
-                            .tracks_out
-                            .iter()
-                            .find(|(_, (src_pid, src_mid))| {
-                                src_pid == origin_pid && *src_mid == data.mid
-                            })
-                    {
-                        if let Some(writer) = target_peer.rtc.writer(out_mid) {
+                    // Find a matching mid on the target peer to forward the media
+                    // For audio: use the target peer's audio mid (sendrecv allows bidirectional)
+                    // For video: use the target peer's video mid if present
+                    let target_mid = if data.params.spec().codec.is_audio() {
+                        target_peer.tracks_in.iter()
+                            .find(|(_, kind)| matches!(kind, MediaKind::Audio))
+                            .map(|(mid, _)| *mid)
+                    } else {
+                        // For video, try tracks_out first (explicit mapping), then fall back to video mid
+                        target_peer.tracks_out.iter()
+                            .find(|(_, (src_pid, src_mid))| src_pid == origin_pid && *src_mid == data.mid)
+                            .map(|(out_mid, _)| *out_mid)
+                            .or_else(|| target_peer.tracks_in.iter()
+                                .find(|(_, kind)| matches!(kind, MediaKind::Video))
+                                .map(|(mid, _)| *mid))
+                    };
+
+                    if let Some(mid) = target_mid {
+                        if let Some(writer) = target_peer.rtc.writer(mid) {
                             if let Err(e) = writer.write(data.pt, data.network_time, data.time, data.data.clone()) {
                                 debug!(
                                     "SFU: failed to write media to peer {} mid {}: {:?}",
-                                    target_pid, out_mid, e
+                                    target_pid, mid, e
                                 );
                             }
                         }
