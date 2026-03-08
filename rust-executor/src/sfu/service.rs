@@ -50,8 +50,6 @@ pub struct SfuConfig {
     /// Peer endpoints for cascade signalling: DID -> "https://host:port"
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub peer_endpoints: HashMap<String, String>,
-    /// Auth tokens for peer endpoints: DID -> auth_token
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
 }
 
 fn default_mode() -> String {
@@ -597,16 +595,16 @@ impl SfuService {
             .build()
             .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
-        for (did, endpoint) in &config.peer_endpoints {
+        for (peer_did, endpoint) in &config.peer_endpoints {
             let url = format!("{}/graphql", endpoint);
-            info!("Broadcasting cascade signal to {} at {}", did, url);
+            info!("Broadcasting cascade signal to {} at {}", peer_did, url);
             let body = serde_json::json!({
                 "query": "mutation SfuHandleCascadeSignal($signal: String!) { sfuHandleCascadeSignal(signalJson: $signal) }",
                 "variables": { "signal": signal_json.clone() }
             });
             let client = client.clone();
             let url = url.clone();
-            let did = did.clone();
+            let did = peer_did.to_string();
             tokio::spawn(async move {
                 match client.post(&url)
                     .header("Content-Type", "application/json")
