@@ -337,6 +337,24 @@ export class NeighbourhoodClient {
         return callJoin
     }
 
+
+    async callRenegotiate(neighbourhoodUrl: string, roomId: string, sdpOffer: string): Promise<CallSession> {
+        const { callRenegotiate } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation callRenegotiate($neighbourhoodUrl: String!, $roomId: String!, $sdpOffer: String!) {
+                callRenegotiate(neighbourhoodUrl: $neighbourhoodUrl, roomId: $roomId, sdpOffer: $sdpOffer) {
+                    roomName
+                    neighbourhoodUrl
+                    participantId
+                    sdpAnswer
+                    redirectTo
+                    streamMapping
+                }
+            }`,
+            variables: { neighbourhoodUrl, roomId, sdpOffer }
+        }))
+        return callRenegotiate
+    }
+
     async callLeave(neighbourhoodUrl: string, roomId: string): Promise<boolean> {
         const { callLeave } = unwrapApolloResult(await this.#apolloClient.mutate({
             mutation: gql`mutation callLeave($neighbourhoodUrl: String!, $roomId: String!) {

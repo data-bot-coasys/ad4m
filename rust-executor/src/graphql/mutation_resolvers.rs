@@ -3099,6 +3099,48 @@ impl Mutation {
             .map_err(|e| FieldError::new(e, Value::null()))
     }
 
+
+    #[cfg(feature = "sfu")]
+    async fn call_renegotiate(
+        context: &RequestContext,
+        neighbourhood_url: String,
+        room_id: String,
+        sdp_offer: String,
+    ) -> FieldResult<crate::sfu::graphql_types::types::CallSessionGql> {
+        use crate::sfu::graphql_types::types::*;
+        use crate::sfu::get_sfu_service;
+
+        check_capability(&context.capabilities, &RUNTIME_SFU_CALL_CAPABILITY)?;
+
+        let service = get_sfu_service()
+            .ok_or_else(|| FieldError::new("SFU service not available", Value::null()))?;
+
+        let agent_did = {
+            let user_email = crate::agent::capabilities::user_email_from_token(context.auth_token.clone());
+            if let Some(email) = user_email {
+                AgentService::get_user_did_by_email(&email).unwrap_or_else(|_| crate::agent::did())
+            } else {
+                crate::agent::did()
+            }
+        };
+
+        let session = service.call_renegotiate(
+            &neighbourhood_url,
+            &room_id,
+            &agent_did,
+            &sdp_offer,
+        ).await.map_err(|e| FieldError::new(e, Value::null()))?;
+
+        Ok(CallSessionGql {
+            room_name: session.room_name,
+            neighbourhood_url: session.neighbourhood_url,
+            participant_id: session.participant_id,
+            sdp_answer: session.sdp_answer,
+            redirect_to: session.redirect_to,
+            stream_mapping: session.stream_mapping,
+        })
+    }
+
     #[cfg(feature = "sfu")]
     async fn call_leave(
         context: &RequestContext,

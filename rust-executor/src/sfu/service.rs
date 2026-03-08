@@ -12,7 +12,7 @@ use log::{error, info, warn};
 use once_cell::sync::OnceCell;
 use str0m::change::SdpOffer;
 use str0m::Rtc;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, oneshot};
 
 use super::cascade::CascadeManager;
 use super::room::{ParticipantId, ParticipantInfo, RoomError, RoomId, RoomManager, SfuRoom};
@@ -321,6 +321,57 @@ impl SfuService {
             sdp_answer,
             redirect_to: None,
             stream_mapping,
+        })
+    }
+
+
+    /// Renegotiate SDP for an existing participant (track add/remove mid-call).
+    /// This updates the existing Rtc instance without destroying the ICE/DTLS session.
+    pub async fn call_renegotiate(
+        &self,
+        neighbourhood_url: &str,
+        room_name: &str,
+        agent_did: &str,
+        sdp_offer_json: &str,
+    ) -> Result<CallSessionInfo, String> {
+        let room_id = RoomId::new(neighbourhood_url, room_name);
+
+        // Verify agent is in the room
+        {
+            let rooms = self.rooms.read().await;
+            let room = rooms.get_room(&room_id)
+                .ok_or_else(|| "Room not found".to_string())?;
+            if !room.participants.values().any(|p| p.agent_did == agent_did) {
+                return Err("Agent not in room — call callJoin first".to_string());
+            }
+        }
+
+        let offer: SdpOffer = serde_json::from_str(sdp_offer_json)
+            .map_err(|e| format!("Invalid SDP offer: {}", e))?;
+
+        let (response_tx, response_rx) = oneshot::channel();
+
+        self.server.command_tx
+            .send(SfuCommand::RenegotiatePeer {
+                agent_did: agent_did.to_string(),
+                room_id: room_id.clone(),
+                sdp_offer: offer,
+                response_tx,
+            })
+            .await
+            .map_err(|e| format!("Failed to send renegotiate command: {}", e))?;
+
+        let sdp_answer = response_rx.await
+            .map_err(|_| "Renegotiation response channel closed".to_string())?
+            .map_err(|e| e)?;
+
+        Ok(CallSessionInfo {
+            room_name: room_name.to_string(),
+            neighbourhood_url: neighbourhood_url.to_string(),
+            participant_id: String::new(), // unchanged
+            sdp_answer,
+            redirect_to: None,
+            stream_mapping: Vec::new(),
         })
     }
 

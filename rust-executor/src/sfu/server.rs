@@ -12,7 +12,7 @@ use str0m::media::{KeyframeRequest, KeyframeRequestKind, MediaData, MediaKind, M
 use str0m::net::Protocol;
 use str0m::{net::Receive, Candidate, Event, IceConnectionState, Input, Output, Rtc};
 use tokio::net::UdpSocket;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 
 use super::relay::MediaRelay;
@@ -39,7 +39,7 @@ pub struct SfuPeer {
 }
 
 /// Commands sent to the SFU event loop from the GraphQL API / signalling layer.
-#[derive(Debug)]
+
 pub enum SfuCommand {
     /// A new peer has completed SDP negotiation and should be added to the event loop.
     AddPeer(SfuPeer),
@@ -50,6 +50,13 @@ pub enum SfuCommand {
         participant_id: ParticipantId,
         /// "high", "medium", "low", or "auto"
         preference: String,
+    },
+    /// Renegotiate SDP for an existing peer (track add/remove).
+    RenegotiatePeer {
+        agent_did: String,
+        room_id: RoomId,
+        sdp_offer: SdpOffer,
+        response_tx: oneshot::Sender<Result<String, String>>,
     },
     /// Shut down the SFU server.
     Shutdown,
@@ -234,6 +241,33 @@ impl SfuServer {
                     Ok(SfuCommand::SetQualityPreference { participant_id, preference }) => {
                         info!("SFU: peer {} quality preference set to '{}'", participant_id, preference);
                         quality_preferences.insert(participant_id, preference);
+                    }
+                    Ok(SfuCommand::RenegotiatePeer { agent_did, room_id, sdp_offer, response_tx }) => {
+                        // Find existing peer by DID + room
+                        let existing_pid = peers.iter()
+                            .find(|(_, p)| p.agent_did == agent_did && p.room_id == room_id)
+                            .map(|(pid, _)| pid.clone());
+
+                        if let Some(pid) = existing_pid {
+                            if let Some(peer) = peers.get_mut(&pid) {
+                                info!("SFU: renegotiating peer {} (DID: {}) in room {}", pid, agent_did, room_id);
+                                match peer.rtc.sdp_api().accept_offer(sdp_offer) {
+                                    Ok(answer) => {
+                                        match serde_json::to_string(&answer) {
+                                            Ok(answer_json) => { let _ = response_tx.send(Ok(answer_json)); }
+                                            Err(e) => { let _ = response_tx.send(Err(format!("Failed to serialize answer: {}", e))); }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        let _ = response_tx.send(Err(format!("Failed to accept renegotiation offer: {}", e)));
+                                    }
+                                }
+                            } else {
+                                let _ = response_tx.send(Err("Peer not found in event loop".to_string()));
+                            }
+                        } else {
+                            let _ = response_tx.send(Err(format!("No existing peer for DID {} in room {}", agent_did, room_id)));
+                        }
                     }
                     Ok(SfuCommand::Shutdown) => {
                         info!("SFU event loop shutting down");

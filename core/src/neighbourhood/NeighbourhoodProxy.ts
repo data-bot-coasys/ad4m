@@ -73,6 +73,12 @@ export class NeighbourhoodProxy {
         return await this.#client.callJoin(url, roomId, sdpOffer)
     }
 
+
+    async callRenegotiate(roomId: string, sdpOffer: string): Promise<CallSession> {
+        const url = await this.#getNeighbourhoodUrl()
+        return await this.#client.callRenegotiate(url, roomId, sdpOffer)
+    }
+
     async callLeave(roomId: string): Promise<boolean> {
         const url = await this.#getNeighbourhoodUrl()
         return await this.#client.callLeave(url, roomId)
