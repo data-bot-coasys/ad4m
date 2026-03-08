@@ -255,8 +255,20 @@ impl SfuService {
                 .get_room_mut(&room_id)
                 .ok_or_else(|| RoomError::NotFound.to_string())?;
 
-            room.add_participant(pid.clone(), agent_did.to_string())
-                .map_err(|e| e.to_string())?;
+            // If agent already in room (stale from disconnect), remove old entry first
+            if let Err(RoomError::AlreadyJoined) = room.add_participant(pid.clone(), agent_did.to_string()) {
+                // Find and remove old participant with same DID
+                let old_pid = room.participants.iter()
+                    .find(|(_, p)| p.agent_did == agent_did)
+                    .map(|(pid, _)| pid.clone());
+                if let Some(old_pid) = old_pid {
+                    room.remove_participant(&old_pid);
+                    // Also tell server loop to clean up old peer
+                    let _ = self.server.command_tx.send(SfuCommand::RemovePeer(old_pid)).await;
+                }
+                room.add_participant(pid.clone(), agent_did.to_string())
+                    .map_err(|e| e.to_string())?;
+            }
         }
 
         // Parse SDP offer and create Rtc instance
