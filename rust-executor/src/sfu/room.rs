@@ -442,3 +442,82 @@ mod tests {
         ));
     }
 }
+
+    // === Additional edge case tests ===
+
+    #[test]
+    fn test_disconnect_cleanup_and_rejoin() {
+        let mut mgr = RoomManager::new();
+        let room_id = RoomId::new("neighbourhood://test", "room1");
+        mgr.create_room(room_id.clone(), None).unwrap();
+
+        let p1 = ParticipantId::next();
+        let did1 = "did:key:z6MkDisconnect".to_string();
+
+        // Join
+        let room = mgr.get_room_mut(&room_id).unwrap();
+        room.add_participant(p1.clone(), did1.clone()).unwrap();
+        assert_eq!(room.participant_count(), 1);
+
+        // Disconnect (remove from all rooms)
+        let cleaned = mgr.remove_participant_from_all(&p1);
+        // Room should be cleaned up since it's now empty
+        assert!(cleaned.contains(&room_id));
+        assert!(mgr.get_room(&room_id).is_none());
+
+        // Rejoin — room needs to be recreated
+        mgr.create_room(room_id.clone(), None).unwrap();
+        let p1_new = ParticipantId::next();
+        let room = mgr.get_room_mut(&room_id).unwrap();
+        room.add_participant(p1_new, did1).unwrap();
+        assert_eq!(room.participant_count(), 1);
+    }
+
+    #[test]
+    fn test_remove_participant_from_multiple_rooms() {
+        let mut mgr = RoomManager::new();
+        let r1 = RoomId::new("nh://a", "room1");
+        let r2 = RoomId::new("nh://a", "room2");
+
+        mgr.create_room(r1.clone(), None).unwrap();
+        mgr.create_room(r2.clone(), None).unwrap();
+
+        let p1 = ParticipantId::next();
+        let p2 = ParticipantId::next();
+
+        // p1 joins both rooms, p2 joins room2
+        mgr.get_room_mut(&r1).unwrap()
+            .add_participant(p1.clone(), "did:key:z6MkP1".to_string()).unwrap();
+        mgr.get_room_mut(&r2).unwrap()
+            .add_participant(p1.clone(), "did:key:z6MkP1".to_string()).unwrap();
+        mgr.get_room_mut(&r2).unwrap()
+            .add_participant(p2.clone(), "did:key:z6MkP2".to_string()).unwrap();
+
+        // p1 disconnects — should be removed from both rooms, r1 cleaned up (empty)
+        let cleaned = mgr.remove_participant_from_all(&p1);
+        assert!(cleaned.contains(&r1)); // r1 was emptied and removed
+        assert!(!cleaned.contains(&r2)); // r2 still has p2
+        assert!(mgr.get_room(&r1).is_none());
+        assert_eq!(mgr.get_room(&r2).unwrap().participant_count(), 1);
+    }
+
+    #[test]
+    fn test_late_joiner_sees_existing_participants() {
+        let room_id = RoomId::new("neighbourhood://test", "room1");
+        let mut room = SfuRoom::new(room_id, None);
+
+        let p1 = ParticipantId::next();
+        let p2 = ParticipantId::next();
+        room.add_participant(p1.clone(), "did:key:z6MkFirst".to_string()).unwrap();
+        room.add_participant(p2.clone(), "did:key:z6MkSecond".to_string()).unwrap();
+
+        // Late joiner — existing participants should be visible
+        let p3 = ParticipantId::next();
+        room.add_participant(p3.clone(), "did:key:z6MkLate".to_string()).unwrap();
+
+        let dids = room.participant_dids();
+        assert_eq!(dids.len(), 3);
+        assert!(dids.contains(&"did:key:z6MkFirst".to_string()));
+        assert!(dids.contains(&"did:key:z6MkSecond".to_string()));
+        assert!(dids.contains(&"did:key:z6MkLate".to_string()));
+    }
