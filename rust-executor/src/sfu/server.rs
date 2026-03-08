@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
+
 use std::time::{Duration, Instant};
 
 use log::{debug, error, info, warn};
@@ -13,7 +13,7 @@ use str0m::net::Protocol;
 use str0m::{net::Receive, Candidate, Event, IceConnectionState, Input, Output, Rtc};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
-use tokio::sync::Mutex;
+
 
 use super::relay::MediaRelay;
 use super::room::{ParticipantId, RoomId};
@@ -116,10 +116,21 @@ impl SfuServer {
     ) -> Result<(Rtc, String), String> {
         let mut rtc = Rtc::builder().build(Instant::now());
 
-        let candidate = Candidate::host(local_addr, "udp")
+        // If bound to 0.0.0.0, resolve to actual network interface IP
+        let resolved_addr = if local_addr.ip().is_unspecified() {
+            // Use UDP connect trick to find the default outbound IP
+            let probe = std::net::UdpSocket::bind("0.0.0.0:0").ok()
+                .and_then(|s| { s.connect("8.8.8.8:80").ok()?; s.local_addr().ok() })
+                .map(|a| a.ip())
+                .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+            std::net::SocketAddr::new(probe, local_addr.port())
+        } else {
+            local_addr
+        };
+        info!("SFU creating host candidate with addr: {}", resolved_addr);
+        let candidate = Candidate::host(resolved_addr, "udp")
             .map_err(|e| format!("Failed to create host candidate: {}", e))?;
-        rtc.add_local_candidate(candidate)
-            .map_err(|e| format!("Failed to add local candidate: {}", e))?;
+        rtc.add_local_candidate(candidate);
 
         let answer = rtc
             .sdp_api()
@@ -143,7 +154,17 @@ impl SfuServer {
         let mut quality_preferences: HashMap<ParticipantId, String> = HashMap::new();
         let mut buf = vec![0u8; 2000];
 
-        info!("SFU event loop started on {}", local_addr);
+        // Resolve 0.0.0.0 to actual IP for ICE candidate matching
+        let resolved_local_addr = if local_addr.ip().is_unspecified() {
+            let probe = std::net::UdpSocket::bind("0.0.0.0:0").ok()
+                .and_then(|s| { s.connect("8.8.8.8:80").ok()?; s.local_addr().ok() })
+                .map(|a| a.ip())
+                .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+            std::net::SocketAddr::new(probe, local_addr.port())
+        } else {
+            local_addr
+        };
+        info!("SFU event loop started on {} (resolved: {})", local_addr, resolved_local_addr);
 
         loop {
             // Process commands
@@ -330,12 +351,12 @@ impl SfuServer {
             // Relay media data to other peers in the same room
             for (origin_pid, data) in &media_to_relay {
                 let origin_room = match peers.get(origin_pid) {
-                    Some(p) => &p.room_id,
+                    Some(p) => p.room_id.clone(),
                     None => continue,
                 };
 
                 // Update relay with voice activity for active speaker detection
-                if data.kind == MediaKind::Audio {
+                if data.params.spec().codec.is_audio() {
                     relay.update_voice_activity(origin_pid, data);
                 }
 
@@ -348,7 +369,7 @@ impl SfuServer {
                     if target_pid == origin_pid {
                         continue;
                     }
-                    if &target_peer.room_id != origin_room {
+                    if target_peer.room_id != origin_room {
                         continue;
                     }
 
@@ -359,7 +380,7 @@ impl SfuServer {
                     }
 
                     // Apply quality preference filtering for video
-                    if data.kind == MediaKind::Video {
+                    if data.params.spec().codec.is_video() {
                         if let Some(rid) = &data.rid {
                             let pref = quality_preferences.get(target_pid).map(|s| s.as_str()).unwrap_or("high");
                             let rid_str = rid.to_string();
@@ -384,7 +405,7 @@ impl SfuServer {
                             })
                     {
                         if let Some(writer) = target_peer.rtc.writer(out_mid) {
-                            if let Err(e) = writer.write(data.network_time, data.time, &data.data) {
+                            if let Err(e) = writer.write(data.pt, data.network_time, data.time, data.data.clone()) {
                                 debug!(
                                     "SFU: failed to write media to peer {} mid {}: {:?}",
                                     target_pid, out_mid, e
@@ -408,9 +429,9 @@ impl SfuServer {
                     requesting_peer.tracks_out.get(&req.mid).cloned()
                 {
                     if let Some(origin_peer) = peers.get_mut(&origin_pid) {
-                        origin_peer
-                            .rtc
-                            .request_keyframe(origin_mid, KeyframeRequestKind::Pli);
+                        if let Some(mut writer) = origin_peer.rtc.writer(origin_mid) {
+                        let _ = writer.request_keyframe(None, KeyframeRequestKind::Pli);
+                    }
                     }
                 }
             }
@@ -429,7 +450,7 @@ impl SfuServer {
                                     Receive {
                                         proto: Protocol::Udp,
                                         source,
-                                        destination: local_addr,
+                                        destination: resolved_local_addr,
                                         contents,
                                     },
                                 );

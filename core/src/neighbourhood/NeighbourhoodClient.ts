@@ -438,29 +438,23 @@ export class NeighbourhoodClient {
                 $neighbourhoodUrl: String!,
                 $mode: String!,
                 $designatedPeer: String,
-                $sfuPeers: [String!],
                 $fallback: String,
-                $maxMeshParticipants: Int,
-                $maxParticipantsPerNode: Int
+                $maxMeshParticipants: Int
             ) {
                 sfuSetConfig(
                     neighbourhoodUrl: $neighbourhoodUrl,
                     mode: $mode,
                     designatedPeer: $designatedPeer,
-                    sfuPeers: $sfuPeers,
                     fallback: $fallback,
-                    maxMeshParticipants: $maxMeshParticipants,
-                    maxParticipantsPerNode: $maxParticipantsPerNode
+                    maxMeshParticipants: $maxMeshParticipants
                 )
             }`,
             variables: {
                 neighbourhoodUrl,
                 mode: config.mode || "mesh",
                 designatedPeer: config.designatedPeer,
-                sfuPeers: config.sfuPeers,
                 fallback: config.fallback,
                 maxMeshParticipants: config.maxMeshParticipants,
-                maxParticipantsPerNode: config.maxParticipantsPerNode,
             }
         }))
         return sfuSetConfig

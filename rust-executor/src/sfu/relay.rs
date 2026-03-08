@@ -6,7 +6,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
-use str0m::media::{MediaData, MediaKind};
+use str0m::media::MediaData;
 
 use super::room::ParticipantId;
 
@@ -66,7 +66,7 @@ impl MediaRelay {
     /// Update voice activity for a participant based on incoming audio data.
     /// Uses a simple energy estimation from the first few bytes of the RTP payload.
     pub fn update_voice_activity(&mut self, pid: &ParticipantId, data: &MediaData) {
-        if data.kind != MediaKind::Audio {
+        if !data.params.spec().codec.is_audio() {
             return;
         }
 

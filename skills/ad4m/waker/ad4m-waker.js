@@ -2,16 +2,13 @@
 /**
  * AD4M Waker — Node.js
  *
- * Watches AD4M perspectives via QuerySubscriptionProxy (SurrealDB-backed)
+ * Watches AD4M perspectives via PerspectiveProxy.subscribeSurrealDB()
  * and wakes an OpenClaw agent when query results change.
  *
- * Requires @coasys/ad4m ^0.12.0
+ * Uses @coasys/ad4m client — same code path as Flux UI.
  *
  * Usage:
  *   node ad4m-waker.js --config waker-config.json
- *
- * To generate waker subscription configs (e.g. mention-tracking queries),
- * use the AD4M MCP tool `get_mention_waker_config` or `generate_waker_query`.
  *
  * Config format:
  *   {
@@ -23,23 +20,14 @@
  *     "subscriptions": [
  *       {
  *         "id": "flux-messages",
- *         "type": "channel-messages",
- *         "perspective": "your-local-perspective-uuid",
- *         "channel": "literal://string:channel-id",
+ *         "perspective": "perspective-uuid",
  *         "query": "SELECT * FROM link WHERE source = 'literal://string:channel-id' AND predicate = 'ad4m://has_child'"
  *       }
  *     ]
  *   }
- *
- * Subscription fields:
- *   - id:            Unique subscription identifier
- *   - type:          "mention" | "channel-messages" — determines the wake message
- *   - perspective:   Local AD4M perspective UUID (from list_perspectives)
- *   - channel:       Channel address (where to read/post messages)
- *   - query:         SurrealQL subscription query
  */
 
-const { Ad4mClient, QuerySubscriptionProxy } = require("@coasys/ad4m");
+const { Ad4mClient } = require("@coasys/ad4m");
 const { ApolloClient, InMemoryCache } = require("@apollo/client/core");
 const { GraphQLWsLink } = require("@apollo/client/link/subscriptions");
 const { createClient } = require("graphql-ws");
@@ -67,7 +55,7 @@ function createAd4mClient(url, token) {
   const wsLink = new GraphQLWsLink(wsClient);
   const apolloClient = new ApolloClient({
     link: wsLink,
-    cache: new InMemoryCache(),
+    cache: new InMemoryCache({ resultCaching: false, addTypename: false }),
     defaultOptions: {
       watchQuery: { fetchPolicy: "no-cache" },
       query: { fetchPolicy: "no-cache" },
@@ -78,50 +66,20 @@ function createAd4mClient(url, token) {
   return new Ad4mClient(apolloClient);
 }
 
-// ── Build wake message ─────────────────────────────────────────────
-
-function buildWakeMessage(config, sub, detail) {
-  const type = sub.type || "unknown";
-  const P = sub.perspective || "unknown";
-  const CH = sub.channel || "unknown";
-  const neighbourhood = sub.neighbourhood || "";
-  const MCP = config.mcpEndpoint || "http://localhost:3001/mcp";
-  const AUTH = config.adminCredential || config.token;
-  const DID = config.agentDid || "unknown";
-
-  const event = type === "mention"
-    ? "You were @mentioned in an AD4M neighbourhood."
-    : type === "channel-messages"
-    ? "New messages in an AD4M neighbourhood."
-    : `AD4M waker event (${type}).`;
-
-  return [
-    event,
-    `Read the AD4M skill for instructions on how to handle this.`,
-    ``,
-    `MCP endpoint: ${MCP}`,
-    `Auth credential: ${AUTH}`,
-    `Agent DID: ${DID}`,
-    `Perspective: ${P}`,
-    `Channel: ${CH}`,
-    neighbourhood ? `Neighbourhood: ${neighbourhood}` : null,
-    `Subscription: ${sub.id}`,
-    `Event type: ${type}`,
-  ].filter(Boolean).join("\n");
-}
-
 // ── Wake poster ────────────────────────────────────────────────────
 
 function postWake(config, sub, detail) {
-  const message = buildWakeMessage(config, sub, detail);
-
-  // Support both /hooks/wake (text+mode) and /hooks/agent (message+name+wakeMode)
-  const isAgentHook = config.wakeUrl.includes("/hooks/agent");
-  const body = JSON.stringify(
-    isAgentHook
-      ? { message, name: "AD4M", wakeMode: "now" }
-      : { text: message, mode: "now" }
-  );
+  const isAgent = config.wakeUrl.includes("/hooks/agent");
+  const body = JSON.stringify(isAgent ? {
+    message: `[AD4M waker] subscription=${sub.id} | perspective=${sub.perspective} | ${detail}. Read new messages and respond if appropriate.`,
+    name: "AD4M",
+    wakeMode: "now",
+    deliver: true,
+    channel: "last"
+  } : {
+    text: `[AD4M waker] subscription=${sub.id} | ${detail}`,
+    mode: "now",
+  });
 
   const url = new URL(config.wakeUrl);
   const mod = url.protocol === "https:" ? https : http;
@@ -133,7 +91,7 @@ function postWake(config, sub, detail) {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "Authorization": `Bearer ${config.wakeToken}`,
+      Authorization: `Bearer ${config.wakeToken}`,
       "Content-Length": Buffer.byteLength(body),
     },
   }, (res) => {
@@ -143,12 +101,9 @@ function postWake(config, sub, detail) {
       if (res.statusCode >= 400) {
         console.error(`[waker] wake POST failed: ${res.statusCode} ${data}`);
       } else {
-        console.log(`[waker] wake sent for subscription ${sub.id} (type=${sub.type || "unknown"})`);
+        console.log(`[waker] wake sent for subscription ${sub.id}`);
       }
     });
-  });
-  req.setTimeout(5000, () => {
-    req.destroy(new Error("wake POST timed out"));
   });
   req.on("error", (e) => console.error("[waker] wake POST error:", e.message));
   req.write(body);
@@ -165,38 +120,34 @@ async function startWaker(config) {
 
   // Verify connection
   const status = await client.agent.status();
-  console.log(`[waker] connected — agent: ${status.did.substring(0, 40)}...`);
+  console.log(`[waker] connected — agent: ${status.did.substring(0, 30)}...`);
 
+  // Per-subscription debounce state
   const debounceTimers = new Map();
   const proxies = [];
 
   for (const sub of config.subscriptions) {
-    if (!sub.type) {
-      console.warn(`[waker] WARNING: subscription "${sub.id}" is missing the "type" field. Add "type": "mention" or "type": "channel-messages" to your config.`);
+    console.log(`[waker] setting up subscription ${sub.id}: ${sub.query.substring(0, 80)}...`);
+
+    // Get a PerspectiveProxy for this perspective
+    const perspective = await client.perspective.byUUID(sub.perspective);
+    if (!perspective) {
+      console.error(`[waker] perspective not found: ${sub.perspective}`);
+      continue;
     }
-    console.log(`[waker] setting up SurrealDB subscription ${sub.id} (type=${sub.type || "unknown"}): ${sub.query.substring(0, 80)}...`);
 
-    // Use QuerySubscriptionProxy directly with SurrealDB query
-    const proxy = new QuerySubscriptionProxy(sub.perspective, sub.query, client.perspective, sub.params);
-    await proxy.subscribe();
-    await proxy.initialized;
+    // Subscribe using PerspectiveProxy.subscribeSurrealDB — same as Flux UI
+    const proxy = await perspective.subscribeSurrealDB(sub.query);
+    proxies.push(proxy);
 
-    console.log(`[waker] ${sub.id} subscribed, initial result count: ${Array.isArray(proxy.result) ? proxy.result.length : '?'}`);
+    console.log(`[waker] ${sub.id} subscribed`);
 
-    // Track last result to skip duplicates
-    let lastResultHash = null;
-
+    // Register callback for changes via onResult (QuerySubscriptionProxy API)
     proxy.onResult((result) => {
-      const serialized = JSON.stringify(result);
-      if (lastResultHash === serialized) {
-        console.log(`[waker] ${sub.id}: duplicate result, skipping`);
-        return;
-      }
-      lastResultHash = serialized;
-
       const count = Array.isArray(result) ? result.length : "?";
       console.log(`[waker] ${sub.id}: query result changed (${count} items)`);
 
+      // Debounce
       const existing = debounceTimers.get(sub.id);
       if (existing) clearTimeout(existing);
       debounceTimers.set(
@@ -208,8 +159,7 @@ async function startWaker(config) {
       );
     });
 
-    proxies.push(proxy);
-    console.log(`[waker] ${sub.id} active`);
+    console.log(`[waker] ${sub.id} fully active`);
   }
 
   return {
@@ -247,47 +197,28 @@ async function main() {
 
   if (args.help) {
     console.log(`
-AD4M Waker — watches AD4M perspectives via QuerySubscriptionProxy (SurrealDB)
-and wakes an OpenClaw agent when query results change.
+AD4M Waker — watches perspectives via PerspectiveProxy.subscribeSurrealDB()
 
-Requires @coasys/ad4m ^0.12.0
+Same mechanism as Flux UI. Uses @coasys/ad4m client.
 
 Usage:
   node ad4m-waker.js --config <path>
 
-Options:
-  --config <path>   Path to waker config JSON file (required).
-  --help            Show this message.
-
-To generate subscription configs (mention tracking, model changes, etc.),
-use the AD4M MCP tools:
-  - get_mention_waker_config   — mention-tracking query for a neighbourhood
-  - generate_waker_query       — SHACL-based query for subject class changes
-
-Config file format:
+Config file format (JSON):
   {
     "executorUrl": "ws://localhost:12100/graphql",
-    "token": "optional-ad4m-credential",
+    "token": "optional-ad4m-token",
     "wakeUrl": "http://localhost:18789/hooks/wake",
-    "wakeToken": "your-openclaw-wake-token",
+    "wakeToken": "your-wake-token",
     "debounceMs": 2000,
     "subscriptions": [
       {
-        "id": "my-subscription",
-        "type": "channel-messages",
-        "perspective": "your-local-perspective-uuid",
-        "channel": "literal://string:channel-id",
-        "query": "SELECT * FROM link WHERE ..."
+        "id": "flux-messages",
+        "perspective": "perspective-uuid",
+        "query": "SELECT * FROM link WHERE source = '...' AND predicate = 'ad4m://has_child'"
       }
     ]
   }
-
-Subscription fields:
-  id             Unique identifier for this subscription
-  type           "mention" or "channel-messages" — determines wake message
-  perspective    Local AD4M perspective UUID (from list_perspectives)
-  channel        Channel address (for reading/posting messages)
-  query          SurrealQL subscription query
 `);
     process.exit(0);
   }
@@ -310,9 +241,6 @@ Subscription fields:
 
   process.on("SIGINT", () => { console.log("\n[waker] shutting down..."); waker.close(); process.exit(0); });
   process.on("SIGTERM", () => { waker.close(); process.exit(0); });
-
-  console.log("[waker] running — waiting for query changes...");
-  setInterval(() => {}, 60000);
 }
 
 if (require.main === module) {

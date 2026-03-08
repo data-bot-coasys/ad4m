@@ -3,6 +3,7 @@ const esbuild = require("esbuild");
 const buildOptions = {
   entryPoints: ["./src/index.ts"],
   bundle: true,
+  external: ["@coasys/ad4m"],
   format: "esm",
   minify: true,
   sourcemap: false,

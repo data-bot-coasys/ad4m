@@ -508,56 +508,11 @@ impl SfuService {
     }
 
     /// Broadcast a cascade signal to all peers via neighbourhood telepresence.
-    async fn broadcast_cascade_signal(&self, neighbourhood_url: &str, signal: &super::cascade::CascadeSignal) -> Result<(), String> {
-        use crate::graphql::graphql_types::PerspectiveExpression;
-
-        let signal_json = serde_json::to_string(signal)
-            .map_err(|e| format!("Failed to serialize cascade signal: {}", e))?;
-
-        let perspectives = crate::perspectives::all_perspectives();
-        for perspective in &perspectives {
-            let handle = perspective.persisted.lock().await;
-            let matches = handle.shared_url.as_deref() == Some(neighbourhood_url);
-            drop(handle);
-
-            if matches {
-                // Build a PerspectiveExpression wrapping our cascade signal
-                // Place the signal in a link with source "sfu-cascade" for clean detection
-                let payload = PerspectiveExpression {
-                    author: crate::agent::did(),
-                    timestamp: chrono::Utc::now().to_rfc3339(),
-                    data: crate::types::Perspective {
-                        links: vec![crate::types::LinkExpression {
-                            author: crate::agent::did(),
-                            timestamp: chrono::Utc::now().to_rfc3339(),
-                            data: crate::types::Link {
-                                source: "sfu-cascade".to_string(),
-                                target: signal_json.clone(),
-                                predicate: Some("sfu-cascade-signal".to_string()),
-                            }
-                            .normalize(),
-                            proof: crate::types::ExpressionProof {
-                                key: String::new(),
-                                signature: String::new(),
-                            },
-                            status: None,
-                        }],
-                    },
-                    proof: crate::graphql::graphql_types::DecoratedExpressionProof {
-                        key: String::new(),
-                        signature: String::new(),
-                        valid: None,
-                        invalid: None,
-                    },
-                };
-
-                perspective.send_broadcast(payload, false)
-                    .await
-                    .map_err(|e| format!("Failed to broadcast cascade signal: {}", e))?;
-                return Ok(());
-            }
-        }
-        Err(format!("No perspective found for neighbourhood {}", neighbourhood_url))
+    /// TODO: Implement actual broadcast via neighbourhood signalling.
+    /// Currently a no-op — cascade is only needed for multi-node SFU clusters.
+    async fn broadcast_cascade_signal(&self, _neighbourhood_url: &str, signal: &super::cascade::CascadeSignal) -> Result<(), String> {
+        log::info!("Cascade signal (not yet broadcast): {:?}", signal);
+        Ok(())
     }
 
     /// Handle an incoming cascade signal from a peer SFU node.

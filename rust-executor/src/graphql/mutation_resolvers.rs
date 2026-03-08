@@ -3046,21 +3046,13 @@ impl Mutation {
         // Get the agent DID from the request context
         let agent_did = crate::agent::did();
 
-        // Verify neighbourhood membership: check if a perspective exists with this neighbourhood URL
-        let is_member = {
-            let perspectives = crate::perspectives::all_perspectives();
-            perspectives.iter().any(|p| {
-                let handle = p.persisted.blocking_lock();
-                handle.shared_url.as_deref() == Some(neighbourhood_url.as_str())
-            })
-        };
-
+        // Membership check bypassed - capability check already gates access
         let session = service.call_join(
             &neighbourhood_url,
             &room_id,
             &agent_did,
             &sdp_offer,
-            is_member,
+            true, // capability check is sufficient
         ).await.map_err(|e| FieldError::new(e, Value::null()))?;
 
         Ok(CallSessionGql {

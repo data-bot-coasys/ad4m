@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 use std::time::Instant;
 
 use log::info;
-use str0m::change::SdpOffer;
+use str0m::change::{SdpOffer, SdpPendingOffer};
 use str0m::media::{MediaKind, Mid};
 use str0m::{Candidate, Rtc};
 
@@ -39,6 +39,8 @@ pub struct PipeTransport {
     /// Tracks being sent to the remote SFU (local mid -> source mid)
     pub tracks_out: HashMap<Mid, Mid>,
     pub established: bool,
+    /// Pending SDP offer (stored until answer arrives)
+    pub pending_offer: Option<SdpPendingOffer>,
 }
 
 impl PipeTransport {
@@ -172,14 +174,10 @@ impl CascadeManager {
         let mut rtc = Rtc::builder().build(Instant::now());
         let candidate = Candidate::host(self.local_addr, "udp")
             .map_err(|e| format!("Failed to create candidate: {}", e))?;
-        rtc.add_local_candidate(candidate)
-            .map_err(|e| format!("Failed to add candidate: {}", e))?;
+        rtc.add_local_candidate(candidate);
 
         // Create offer via SDP API — the remote side will add media lines on accept
-        let offer = rtc
-            .sdp_api()
-            .apply()
-            .map_err(|e| format!("Failed to create pipe offer: {}", e))?;
+        let (offer, pending_offer) = rtc.sdp_api().apply().ok_or_else(|| "No changes to apply".to_string())?;
 
         let sdp_offer = serde_json::to_string(&offer)
             .map_err(|e| format!("Failed to serialize offer: {}", e))?;
@@ -191,6 +189,7 @@ impl CascadeManager {
             tracks_in: HashMap::new(),
             tracks_out: HashMap::new(),
             established: false,
+            pending_offer: Some(pending_offer),
         };
 
         self.pipes.insert(pipe_key, pipe);
@@ -216,8 +215,7 @@ impl CascadeManager {
         let mut rtc = Rtc::builder().build(Instant::now());
         let candidate = Candidate::host(self.local_addr, "udp")
             .map_err(|e| format!("Failed to create candidate: {}", e))?;
-        rtc.add_local_candidate(candidate)
-            .map_err(|e| format!("Failed to add candidate: {}", e))?;
+        rtc.add_local_candidate(candidate);
 
         let answer = rtc
             .sdp_api()
@@ -239,6 +237,7 @@ impl CascadeManager {
             tracks_in: HashMap::new(),
             tracks_out: HashMap::new(),
             established: true,
+            pending_offer: None,
         };
 
         let pipe_key = (room_id.to_string(), from_did.to_string());
@@ -271,8 +270,11 @@ impl CascadeManager {
         let answer: str0m::change::SdpAnswer = serde_json::from_str(sdp_answer_json)
             .map_err(|e| format!("Invalid pipe SDP answer: {}", e))?;
 
+        let pending = pipe.pending_offer.take()
+            .ok_or_else(|| "No pending offer stored for this pipe".to_string())?;
+
         rtc.sdp_api()
-            .accept_answer(answer)
+            .accept_answer(pending, answer)
             .map_err(|e| format!("Failed to accept pipe answer: {}", e))?;
 
         pipe.established = true;
