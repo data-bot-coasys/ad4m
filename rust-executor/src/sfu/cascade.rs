@@ -177,10 +177,11 @@ impl CascadeManager {
         rtc.add_local_candidate(candidate);
 
         // Add a media line so the SDP offer has something to negotiate.
-        // Pipe transports carry forwarded audio (and potentially video) between SFU nodes.
+        // Pipe transports carry forwarded audio and video between SFU nodes.
         use str0m::media::{Direction, MediaKind};
         let mut api = rtc.sdp_api();
         let audio_mid = api.add_media(MediaKind::Audio, Direction::SendRecv, None, None, None);
+        let video_mid = api.add_media(MediaKind::Video, Direction::SendRecv, None, None, None);
 
         // Create offer via SDP API
         let (offer, pending_offer) = api.apply().ok_or_else(|| "No changes to apply".to_string())?;
@@ -190,6 +191,7 @@ impl CascadeManager {
 
         let mut pipe_tracks_in = HashMap::new();
         pipe_tracks_in.insert(audio_mid, MediaKind::Audio);
+        pipe_tracks_in.insert(video_mid, MediaKind::Video);
 
         let pipe = PipeTransport {
             remote_did: remote_did.to_string(),
