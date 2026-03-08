@@ -649,14 +649,37 @@ impl SfuService {
 
         match signal {
             super::cascade::CascadeSignal::Announce { did, room_id, participant_count, capacity_hint } => {
-                mgr.handle_sfu_announce(did, room_id, participant_count, capacity_hint);
+                mgr.handle_sfu_announce(did.clone(), room_id.clone(), participant_count, capacity_hint);
+                
+                // Auto-establish pipe transport if we have participants in the same room
+                let (nh_url, room_name) = room_id.rsplit_once(':').unwrap_or((&room_id, "default"));
+                let local_room_id = super::room::RoomId::new(nh_url, room_name);
+                let rooms = self.rooms.read().await;
+                let local_has_participants = rooms.get_room(&local_room_id)
+                    .map(|r| r.participant_count() > 0)
+                    .unwrap_or(false);
+                drop(rooms);
+                
+                if local_has_participants && participant_count > 0 {
+                    info!("Auto-establishing pipe transport to {} for room {}", did, room_id);
+                    match mgr.establish_pipe(&did, &local_room_id) {
+                        Ok(pipe_signal) => {
+                            drop(cascade);
+                            self.broadcast_cascade_signal(nh_url, &pipe_signal).await?;
+                        }
+                        Err(e) => {
+                            info!("Pipe transport not established (may already exist): {}", e);
+                        }
+                    }
+                }
+                
                 Ok(())
             }
             super::cascade::CascadeSignal::PipeOffer { from_did, room_id, sdp_offer, .. } => {
                 let answer_signal = mgr.handle_pipe_offer(&from_did, &room_id, &sdp_offer)?;
                 // Extract the Rtc for the server event loop
                 if let Some(rtc) = mgr.take_pipe_rtc(&room_id, &from_did) {
-                    let (nh_url, room_name) = room_id.split_once(':').unwrap_or((&room_id, "default"));
+                    let (nh_url, room_name) = room_id.rsplit_once(':').unwrap_or((&room_id, "default"));
                     let pid = ParticipantId::next();
                     let peer = SfuPeer {
                         id: pid,
@@ -670,7 +693,7 @@ impl SfuService {
                     };
                     let _ = self.server.command_tx.send(SfuCommand::AddPeer(peer)).await;
                 }
-                let (nh_url, _) = room_id.split_once(':').unwrap_or((&room_id, ""));
+                let (nh_url, _) = room_id.rsplit_once(':').unwrap_or((&room_id, ""));
                 drop(cascade);
                 self.broadcast_cascade_signal(nh_url, &answer_signal).await
             }
@@ -678,7 +701,7 @@ impl SfuService {
                 mgr.handle_pipe_answer(&from_did, &room_id, &sdp_answer)?;
                 // Extract the Rtc for the server event loop
                 if let Some(rtc) = mgr.take_pipe_rtc(&room_id, &from_did) {
-                    let (nh_url, room_name) = room_id.split_once(':').unwrap_or((&room_id, "default"));
+                    let (nh_url, room_name) = room_id.rsplit_once(':').unwrap_or((&room_id, "default"));
                     let pid = ParticipantId::next();
                     let peer = SfuPeer {
                         id: pid,

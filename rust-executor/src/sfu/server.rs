@@ -102,8 +102,18 @@ impl SfuServer {
     /// Start the SFU server. Binds a UDP socket and spawns the event loop on tokio.
     pub async fn start(config: SfuServerConfig) -> Result<Self, std::io::Error> {
         let socket = UdpSocket::bind(config.bind_addr).await?;
-        let local_addr = socket.local_addr()?;
-        info!("SFU server bound to UDP {}", local_addr);
+        let raw_addr = socket.local_addr()?;
+        // Resolve 0.0.0.0 to actual network interface IP for cascade pipe transports
+        let local_addr = if raw_addr.ip().is_unspecified() {
+            let probe = std::net::UdpSocket::bind("0.0.0.0:0").ok()
+                .and_then(|s| { s.connect("8.8.8.8:80").ok()?; s.local_addr().ok() })
+                .map(|a| a.ip())
+                .unwrap_or(raw_addr.ip());
+            std::net::SocketAddr::new(probe, raw_addr.port())
+        } else {
+            raw_addr
+        };
+        info!("SFU server bound to UDP {} (resolved: {})", raw_addr, local_addr);
 
         let (command_tx, command_rx) = mpsc::channel(256);
 
