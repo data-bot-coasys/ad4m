@@ -50,6 +50,8 @@ pub struct SfuConfig {
     /// Peer endpoints for cascade signalling: DID -> "https://host:port"
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub peer_endpoints: HashMap<String, String>,
+    /// Auth tokens for peer endpoints: DID -> auth_token
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
 }
 
 fn default_mode() -> String {
@@ -600,7 +602,7 @@ impl SfuService {
             info!("Broadcasting cascade signal to {} at {}", did, url);
             let body = serde_json::json!({
                 "query": "mutation SfuHandleCascadeSignal($signal: String!) { sfuHandleCascadeSignal(signalJson: $signal) }",
-                "variables": { "signal": signal_json }
+                "variables": { "signal": signal_json.clone() }
             });
             let client = client.clone();
             let url = url.clone();

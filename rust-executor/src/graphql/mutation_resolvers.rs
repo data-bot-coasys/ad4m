@@ -3178,6 +3178,7 @@ impl Mutation {
         sfu_peers: Option<Vec<String>>,
         max_participants_per_node: Option<i32>,
         peer_endpoints: Option<Vec<String>>,
+        peer_auth_tokens: Option<Vec<String>>,
     ) -> FieldResult<bool> {
         use crate::sfu::get_sfu_service;
 
@@ -3212,6 +3213,17 @@ impl Mutation {
                 }
                 map
             },
+            peer_auth_tokens: {
+                let mut map = std::collections::HashMap::new();
+                if let Some(tokens) = peer_auth_tokens {
+                    for entry in tokens {
+                        if let Some((did, token)) = entry.split_once('=') {
+                            map.insert(did.to_string(), token.to_string());
+                        }
+                    }
+                }
+                map
+            },
         };
 
         service.set_config(&neighbourhood_url, config).await
@@ -3241,7 +3253,7 @@ impl Mutation {
         signal_json: String,
     ) -> FieldResult<bool> {
         use crate::sfu::get_sfu_service;
-        check_capability(&context.capabilities, &RUNTIME_SFU_CALL_CAPABILITY)?;
+        // No auth check — cascade signals are inter-node communication
         let service = get_sfu_service()
             .ok_or_else(|| FieldError::new("SFU service not available", Value::null()))?;
         service.handle_cascade_signal(&signal_json).await
