@@ -3177,6 +3177,7 @@ impl Mutation {
         max_mesh_participants: Option<i32>,
         sfu_peers: Option<Vec<String>>,
         max_participants_per_node: Option<i32>,
+        peer_endpoints: Option<Vec<String>>,
     ) -> FieldResult<bool> {
         use crate::sfu::get_sfu_service;
 
@@ -3200,6 +3201,17 @@ impl Mutation {
             max_mesh_participants: max_mesh,
             sfu_peers: sfu_peers.unwrap_or_default(),
             max_participants_per_node: max_participants_per_node.map(|v| v as u32),
+            peer_endpoints: {
+                let mut map = std::collections::HashMap::new();
+                if let Some(endpoints) = peer_endpoints {
+                    for entry in endpoints {
+                        if let Some((did, addr)) = entry.split_once('=') {
+                            map.insert(did.to_string(), addr.to_string());
+                        }
+                    }
+                }
+                map
+            },
         };
 
         service.set_config(&neighbourhood_url, config).await
@@ -3219,6 +3231,20 @@ impl Mutation {
         let service = get_sfu_service()
             .ok_or_else(|| FieldError::new("SFU service not available", Value::null()))?;
         service.announce_as_sfu_node(&neighbourhood_url, &room_id).await
+            .map_err(|e| FieldError::new(e, Value::null()))?;
+        Ok(true)
+    }
+
+    #[cfg(feature = "sfu")]
+    async fn sfu_handle_cascade_signal(
+        context: &RequestContext,
+        signal_json: String,
+    ) -> FieldResult<bool> {
+        use crate::sfu::get_sfu_service;
+        check_capability(&context.capabilities, &RUNTIME_SFU_CALL_CAPABILITY)?;
+        let service = get_sfu_service()
+            .ok_or_else(|| FieldError::new("SFU service not available", Value::null()))?;
+        service.handle_cascade_signal(&signal_json).await
             .map_err(|e| FieldError::new(e, Value::null()))?;
         Ok(true)
     }

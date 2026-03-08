@@ -47,6 +47,9 @@ pub struct SfuConfig {
     /// Max participants per SFU node in cascaded mode
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_participants_per_node: Option<u32>,
+    /// Peer endpoints for cascade signalling: DID -> "https://host:port"
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub peer_endpoints: HashMap<String, String>,
 }
 
 fn default_mode() -> String {
@@ -68,6 +71,7 @@ impl Default for SfuConfig {
             max_mesh_participants: default_max_mesh(),
             sfu_peers: Vec::new(),
             max_participants_per_node: None,
+            peer_endpoints: HashMap::new(),
         }
     }
 }
@@ -573,11 +577,47 @@ impl SfuService {
         self.broadcast_cascade_signal(neighbourhood_url, &signal).await
     }
 
-    /// Broadcast a cascade signal to all peers via neighbourhood telepresence.
-    /// TODO: Implement actual broadcast via neighbourhood signalling.
-    /// Currently a no-op — cascade is only needed for multi-node SFU clusters.
-    async fn broadcast_cascade_signal(&self, _neighbourhood_url: &str, signal: &super::cascade::CascadeSignal) -> Result<(), String> {
-        log::info!("Cascade signal (not yet broadcast): {:?}", signal);
+    /// Broadcast a cascade signal to all peers via direct HTTP to peer endpoints.
+    async fn broadcast_cascade_signal(&self, neighbourhood_url: &str, signal: &super::cascade::CascadeSignal) -> Result<(), String> {
+        let signal_json = serde_json::to_string(signal)
+            .map_err(|e| format!("Failed to serialize cascade signal: {}", e))?;
+
+        let configs = self.configs.read().await;
+        let config = match configs.get(neighbourhood_url) {
+            Some(c) => c.clone(),
+            None => return Ok(()),
+        };
+        drop(configs);
+
+        let client = reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+
+        for (did, endpoint) in &config.peer_endpoints {
+            let url = format!("{}/graphql", endpoint);
+            info!("Broadcasting cascade signal to {} at {}", did, url);
+            let body = serde_json::json!({
+                "query": "mutation SfuHandleCascadeSignal($signal: String!) { sfuHandleCascadeSignal(signalJson: $signal) }",
+                "variables": { "signal": signal_json }
+            });
+            let client = client.clone();
+            let url = url.clone();
+            let did = did.clone();
+            tokio::spawn(async move {
+                match client.post(&url)
+                    .header("Content-Type", "application/json")
+                    .json(&body)
+                    .send()
+                    .await
+                {
+                    Ok(resp) => info!("Cascade signal sent to {}: {}", did, resp.status()),
+                    Err(e) => warn!("Failed to send cascade signal to {}: {}", did, e),
+                }
+            });
+        }
+
         Ok(())
     }
 
