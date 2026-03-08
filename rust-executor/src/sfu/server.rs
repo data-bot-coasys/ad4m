@@ -353,6 +353,13 @@ impl SfuServer {
                                 info!("SFU: peer {} added {:?} track mid={}", pid, e.kind, e.mid);
                                 peer.tracks_in.insert(e.mid, e.kind);
 
+                                // Request keyframe for newly added video tracks
+                                if matches!(e.kind, MediaKind::Video) {
+                                    if let Some(mut writer) = peer.rtc.writer(e.mid) {
+                                        info!("SFU: requesting keyframe from peer {} for new video track mid={}", pid, e.mid);
+                                        let _ = writer.request_keyframe(None, KeyframeRequestKind::Pli);
+                                    }
+                                }
 
                                 // Publish stream event
                                 let stream_event = super::graphql_types::types::CallStreamEvent {
