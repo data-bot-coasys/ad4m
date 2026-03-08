@@ -3175,6 +3175,8 @@ impl Mutation {
         designated_peer: Option<String>,
         fallback: Option<String>,
         max_mesh_participants: Option<i32>,
+        sfu_peers: Option<Vec<String>>,
+        max_participants_per_node: Option<i32>,
     ) -> FieldResult<bool> {
         use crate::sfu::get_sfu_service;
 
@@ -3196,8 +3198,8 @@ impl Mutation {
             designated_peer,
             fallback: fallback.unwrap_or_else(|| "mesh".to_string()),
             max_mesh_participants: max_mesh,
-            sfu_peers: Vec::new(),
-            max_participants_per_node: None,
+            sfu_peers: sfu_peers.unwrap_or_default(),
+            max_participants_per_node: max_participants_per_node.map(|v| v as u32),
         };
 
         service.set_config(&neighbourhood_url, config).await
