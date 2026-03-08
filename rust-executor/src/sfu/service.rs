@@ -50,6 +50,9 @@ pub struct SfuConfig {
     /// Peer endpoints for cascade signalling: DID -> "https://host:port"
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub peer_endpoints: HashMap<String, String>,
+    /// Auth tokens for peer endpoints: DID -> auth_token
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub peer_auth_tokens: HashMap<String, String>,
 }
 
 fn default_mode() -> String {
@@ -72,6 +75,7 @@ impl Default for SfuConfig {
             sfu_peers: Vec::new(),
             max_participants_per_node: None,
             peer_endpoints: HashMap::new(),
+            peer_auth_tokens: HashMap::new(),
         }
     }
 }
@@ -604,10 +608,12 @@ impl SfuService {
             });
             let client = client.clone();
             let url = url.clone();
+            let auth_token: String = config.peer_auth_tokens.get(peer_did).cloned().unwrap_or_default();
             let did = peer_did.to_string();
             tokio::spawn(async move {
                 match client.post(&url)
                     .header("Content-Type", "application/json")
+                    .header("Authorization", auth_token)
                     .json(&body)
                     .send()
                     .await
