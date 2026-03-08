@@ -176,8 +176,14 @@ impl CascadeManager {
             .map_err(|e| format!("Failed to create candidate: {}", e))?;
         rtc.add_local_candidate(candidate);
 
-        // Create offer via SDP API — the remote side will add media lines on accept
-        let (offer, pending_offer) = rtc.sdp_api().apply().ok_or_else(|| "No changes to apply".to_string())?;
+        // Add a media line so the SDP offer has something to negotiate.
+        // Pipe transports carry forwarded audio (and potentially video) between SFU nodes.
+        use str0m::media::{Direction, MediaKind};
+        let mut api = rtc.sdp_api();
+        let _mid = api.add_media(MediaKind::Audio, Direction::SendRecv, None, None, None);
+
+        // Create offer via SDP API
+        let (offer, pending_offer) = api.apply().ok_or_else(|| "No changes to apply".to_string())?;
 
         let sdp_offer = serde_json::to_string(&offer)
             .map_err(|e| format!("Failed to serialize offer: {}", e))?;
