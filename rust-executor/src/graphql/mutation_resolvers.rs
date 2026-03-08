@@ -3178,6 +3178,7 @@ impl Mutation {
         sfu_peers: Option<Vec<String>>,
         max_participants_per_node: Option<i32>,
         peer_endpoints: Option<Vec<String>>,
+        peer_auth_tokens: Option<Vec<String>>,
     ) -> FieldResult<bool> {
         use crate::sfu::get_sfu_service;
 
@@ -3212,7 +3213,17 @@ impl Mutation {
                 }
                 map
             },
-
+            peer_auth_tokens: {
+                let mut map = std::collections::HashMap::new();
+                if let Some(tokens) = peer_auth_tokens {
+                    for entry in tokens {
+                        if let Some((did, token)) = entry.split_once('=') {
+                            map.insert(did.to_string(), token.to_string());
+                        }
+                    }
+                }
+                map
+            },
         };
 
         service.set_config(&neighbourhood_url, config).await
