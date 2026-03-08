@@ -397,7 +397,10 @@ impl SfuService {
     /// Get the SFU config for a neighbourhood.
     pub async fn get_config(&self, neighbourhood_url: &str) -> SfuConfig {
         let configs = self.configs.read().await;
-        configs.get(neighbourhood_url).cloned().unwrap_or_default()
+        configs.get(neighbourhood_url)
+            .or_else(|| configs.get("global"))
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Set the SFU config for a neighbourhood (from Social DNA).
