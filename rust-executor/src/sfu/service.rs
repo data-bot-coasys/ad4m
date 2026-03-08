@@ -452,9 +452,9 @@ impl SfuService {
     /// Get the designated SFU peer DID for a neighbourhood.
     pub async fn sfu_peer_for_neighbourhood(&self, neighbourhood_url: &str) -> Option<String> {
         let configs = self.configs.read().await;
-        configs
-            .get(neighbourhood_url)
-            .and_then(|c| match c.mode.as_str() {
+        let config = configs.get(neighbourhood_url)
+            .or_else(|| configs.get("global"));
+        config.and_then(|c| match c.mode.as_str() {
                 "designated" => c.designated_peer.clone(),
                 "gateway" => Some("gateway".to_string()), // Sentinel — caller resolves gateway DID
                 _ => None,
