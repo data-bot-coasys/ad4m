@@ -325,10 +325,13 @@ impl SfuService {
         // Auto-announce in cascade mode when a participant joins
         {
             let cascade = self.cascade_manager.read().await;
-            if cascade.is_some() {
+            let has_cascade = cascade.is_some();
+            info!("call_join: cascade_manager present: {}, will announce for {}/{}", has_cascade, neighbourhood_url, room_name);
+            if has_cascade {
                 drop(cascade);
-                if let Err(e) = self.announce_as_sfu_node(neighbourhood_url, room_name).await {
-                    warn!("Failed to auto-announce cascade: {}", e);
+                match self.announce_as_sfu_node(neighbourhood_url, room_name).await {
+                    Ok(()) => info!("Auto-announced cascade successfully"),
+                    Err(e) => warn!("Failed to auto-announce cascade: {}", e),
                 }
             }
         }
