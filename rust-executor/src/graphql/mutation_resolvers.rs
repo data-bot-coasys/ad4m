@@ -3043,8 +3043,15 @@ impl Mutation {
         let service = get_sfu_service()
             .ok_or_else(|| FieldError::new("SFU service not available", Value::null()))?;
 
-        // Get the agent DID from the request context
-        let agent_did = crate::agent::did();
+        // Get the agent DID - use user-specific DID in multi-user mode
+        let agent_did = {
+            let user_email = crate::agent::capabilities::user_email_from_token(context.auth_token.clone());
+            if let Some(email) = user_email {
+                AgentService::get_user_did_by_email(&email).unwrap_or_else(|_| crate::agent::did())
+            } else {
+                crate::agent::did()
+            }
+        };
 
         // Membership check bypassed - capability check already gates access
         let session = service.call_join(
@@ -3079,7 +3086,14 @@ impl Mutation {
         let service = get_sfu_service()
             .ok_or_else(|| FieldError::new("SFU service not available", Value::null()))?;
 
-        let agent_did = crate::agent::did();
+        let agent_did = {
+            let user_email = crate::agent::capabilities::user_email_from_token(context.auth_token.clone());
+            if let Some(email) = user_email {
+                AgentService::get_user_did_by_email(&email).unwrap_or_else(|_| crate::agent::did())
+            } else {
+                crate::agent::did()
+            }
+        };
 
         service.call_set_quality_preference(&neighbourhood_url, &room_id, &agent_did, &preference).await
             .map_err(|e| FieldError::new(e, Value::null()))
@@ -3098,7 +3112,14 @@ impl Mutation {
         let service = get_sfu_service()
             .ok_or_else(|| FieldError::new("SFU service not available", Value::null()))?;
 
-        let agent_did = crate::agent::did();
+        let agent_did = {
+            let user_email = crate::agent::capabilities::user_email_from_token(context.auth_token.clone());
+            if let Some(email) = user_email {
+                AgentService::get_user_did_by_email(&email).unwrap_or_else(|_| crate::agent::did())
+            } else {
+                crate::agent::did()
+            }
+        };
 
         service.call_leave(&neighbourhood_url, &room_id, &agent_did).await
             .map_err(|e| FieldError::new(e, Value::null()))
