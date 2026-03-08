@@ -180,7 +180,7 @@ impl CascadeManager {
         // Pipe transports carry forwarded audio (and potentially video) between SFU nodes.
         use str0m::media::{Direction, MediaKind};
         let mut api = rtc.sdp_api();
-        let _mid = api.add_media(MediaKind::Audio, Direction::SendRecv, None, None, None);
+        let audio_mid = api.add_media(MediaKind::Audio, Direction::SendRecv, None, None, None);
 
         // Create offer via SDP API
         let (offer, pending_offer) = api.apply().ok_or_else(|| "No changes to apply".to_string())?;
@@ -188,11 +188,14 @@ impl CascadeManager {
         let sdp_offer = serde_json::to_string(&offer)
             .map_err(|e| format!("Failed to serialize offer: {}", e))?;
 
+        let mut pipe_tracks_in = HashMap::new();
+        pipe_tracks_in.insert(audio_mid, MediaKind::Audio);
+
         let pipe = PipeTransport {
             remote_did: remote_did.to_string(),
             rtc: Some(rtc),
             room_id: room_id.clone(),
-            tracks_in: HashMap::new(),
+            tracks_in: pipe_tracks_in,
             tracks_out: HashMap::new(),
             established: false,
             pending_offer: Some(pending_offer),
@@ -233,7 +236,7 @@ impl CascadeManager {
 
         // Parse room_id from the string format "neighbourhood_url:room_name"
         let (nh_url, room_name) = room_id
-            .split_once(':')
+            .rsplit_once(':')
             .unwrap_or((room_id, "default"));
 
         let pipe = PipeTransport {
@@ -358,11 +361,14 @@ impl CascadeManager {
             .unwrap_or(false)
     }
 
-    /// After pipe establishment, extract the Rtc for a given peer so it can be added to the server event loop.
-    pub fn take_pipe_rtc(&mut self, room_id: &str, remote_did: &str) -> Option<Rtc> {
+    /// After pipe establishment, extract the Rtc and pre-populated tracks for the server event loop.
+    pub fn take_pipe_rtc(&mut self, room_id: &str, remote_did: &str) -> Option<(Rtc, HashMap<Mid, MediaKind>)> {
         let pipe_key = (room_id.to_string(), remote_did.to_string());
         if let Some(pipe) = self.pipes.get_mut(&pipe_key) {
-            return pipe.take_rtc();
+            if let Some(rtc) = pipe.take_rtc() {
+                let tracks = std::mem::take(&mut pipe.tracks_in);
+                return Some((rtc, tracks));
+            }
         }
         None
     }
@@ -437,8 +443,8 @@ mod tests {
         };
         node_a.handle_pipe_answer("did:key:nodeB", &room_id.to_string(), &sdp_answer).unwrap();
 
-        let rtc = node_a.take_pipe_rtc(&room_id.to_string(), "did:key:nodeB");
-        assert!(rtc.is_some());
+        let rtc_and_tracks = node_a.take_pipe_rtc(&room_id.to_string(), "did:key:nodeB");
+        assert!(rtc_and_tracks.is_some());
         let rtc_again = node_a.take_pipe_rtc(&room_id.to_string(), "did:key:nodeB");
         assert!(rtc_again.is_none());
 

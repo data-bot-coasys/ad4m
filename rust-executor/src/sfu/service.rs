@@ -681,15 +681,16 @@ impl SfuService {
             super::cascade::CascadeSignal::PipeOffer { from_did, room_id, sdp_offer, .. } => {
                 let answer_signal = mgr.handle_pipe_offer(&from_did, &room_id, &sdp_offer)?;
                 // Extract the Rtc for the server event loop
-                if let Some(rtc) = mgr.take_pipe_rtc(&room_id, &from_did) {
+                if let Some((rtc, pipe_tracks)) = mgr.take_pipe_rtc(&room_id, &from_did) {
                     let (nh_url, room_name) = room_id.rsplit_once(':').unwrap_or((&room_id, "default"));
                     let pid = ParticipantId::next();
+                    info!("SFU: creating pipe peer {} with pre-populated tracks: {:?}", pid, pipe_tracks);
                     let peer = SfuPeer {
                         id: pid,
                         room_id: RoomId::new(nh_url, room_name),
                         agent_did: from_did.clone(),
                         rtc,
-                        tracks_in: HashMap::new(),
+                        tracks_in: pipe_tracks,
                         tracks_out: HashMap::new(),
                         is_pipe_transport: true,
                         pipe_remote_did: Some(from_did.clone()),
@@ -703,15 +704,16 @@ impl SfuService {
             super::cascade::CascadeSignal::PipeAnswer { from_did, room_id, sdp_answer, .. } => {
                 mgr.handle_pipe_answer(&from_did, &room_id, &sdp_answer)?;
                 // Extract the Rtc for the server event loop
-                if let Some(rtc) = mgr.take_pipe_rtc(&room_id, &from_did) {
+                if let Some((rtc, pipe_tracks)) = mgr.take_pipe_rtc(&room_id, &from_did) {
                     let (nh_url, room_name) = room_id.rsplit_once(':').unwrap_or((&room_id, "default"));
                     let pid = ParticipantId::next();
+                    info!("SFU: creating pipe peer {} with pre-populated tracks: {:?}", pid, pipe_tracks);
                     let peer = SfuPeer {
                         id: pid,
                         room_id: RoomId::new(nh_url, room_name),
                         agent_did: from_did.clone(),
                         rtc,
-                        tracks_in: HashMap::new(),
+                        tracks_in: pipe_tracks,
                         tracks_out: HashMap::new(),
                         is_pipe_transport: true,
                         pipe_remote_did: Some(from_did.clone()),

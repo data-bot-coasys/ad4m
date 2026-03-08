@@ -383,6 +383,9 @@ impl SfuServer {
                                 }
                             }
                             Event::MediaData(data) => {
+                                if peer.is_pipe_transport {
+                                    debug!("SFU: received media from pipe peer {} mid={}", pid, data.mid);
+                                }
                                 media_to_relay.push((pid.clone(), data));
                             }
                             Event::KeyframeRequest(req) => {
@@ -464,6 +467,9 @@ impl SfuServer {
                     };
 
                     if let Some(mid) = target_mid {
+                        if target_peer.is_pipe_transport {
+                            debug!("SFU: forwarding media to pipe peer {} mid={}", target_pid, mid);
+                        }
                         if let Some(writer) = target_peer.rtc.writer(mid) {
                             if let Err(e) = writer.write(data.pt, data.network_time, data.time, data.data.clone()) {
                                 debug!(
@@ -472,6 +478,11 @@ impl SfuServer {
                                 );
                             }
                         }
+                    } else if target_peer.is_pipe_transport {
+                        debug!(
+                            "SFU: no target mid for pipe peer {} (tracks_in: {:?}), cannot forward {:?} from {}",
+                            target_pid, target_peer.tracks_in, if data.params.spec().codec.is_audio() { "audio" } else { "video" }, origin_pid
+                        );
                     }
                 }
             }
