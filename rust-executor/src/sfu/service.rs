@@ -113,6 +113,12 @@ pub struct SfuService {
     configs: Arc<RwLock<HashMap<String, SfuConfig>>>,
     /// Cascade manager for multi-node SFU deployments.
     cascade_manager: Arc<RwLock<Option<CascadeManager>>>,
+    /// Maps local perspective UUID -> shared neighbourhood URL for cascade signals.
+    /// Each node has a different perspective UUID for the same neighbourhood,
+    /// so cascade signals must use the shared_url as the common namespace.
+    local_to_shared: Arc<RwLock<HashMap<String, String>>>,
+    /// Reverse map: shared neighbourhood URL -> local perspective UUID.
+    shared_to_local: Arc<RwLock<HashMap<String, String>>>,
 }
 
 impl SfuService {
@@ -129,6 +135,8 @@ impl SfuService {
             rooms: Arc::new(RwLock::new(RoomManager::new())),
             configs: Arc::new(RwLock::new(HashMap::new())),
             cascade_manager: Arc::new(RwLock::new(None)),
+            local_to_shared: Arc::new(RwLock::new(HashMap::new())),
+            shared_to_local: Arc::new(RwLock::new(HashMap::new())),
         });
 
         SFU_SERVICE
@@ -557,6 +565,28 @@ impl SfuService {
                 max_per_node,
             ));
             info!("Cascade manager initialized for neighbourhood {}", neighbourhood_url);
+
+            // Resolve local perspective UUID -> shared neighbourhood URL for cascade namespace.
+            // Each node has a different perspective UUID for the same neighbourhood,
+            // so we use shared_url as the common identifier in cascade signals.
+            info!("Looking up perspective for namespace mapping: {}", neighbourhood_url);
+            if let Some(perspective) = crate::perspectives::get_perspective(neighbourhood_url) {
+                let handle = perspective.persisted.lock().await;
+                let shared_url_opt = handle.shared_url.clone();
+                drop(handle);
+                if let Some(shared_url) = shared_url_opt {
+                    info!("Found shared_url: {}", shared_url);
+                    let mut l2s = self.local_to_shared.write().await;
+                    let mut s2l = self.shared_to_local.write().await;
+                    l2s.insert(neighbourhood_url.to_string(), shared_url.clone());
+                    s2l.insert(shared_url.clone(), neighbourhood_url.to_string());
+                    info!("Cascade namespace: {} -> {}", neighbourhood_url, shared_url);
+                } else {
+                    warn!("Perspective {} has no shared_url", neighbourhood_url);
+                }
+            } else {
+                warn!("Perspective {} not found for namespace mapping", neighbourhood_url);
+            }
         } else {
             let mut cascade = self.cascade_manager.write().await;
             *cascade = None;
@@ -602,7 +632,22 @@ impl SfuService {
     pub async fn sfu_nodes_for_room(&self, neighbourhood_url: &str, room_id: &str) -> Vec<super::cascade::SfuNodeInfo> {
         let cascade = self.cascade_manager.read().await;
         match &*cascade {
-            Some(mgr) => { let composite = format!("{}:{}", neighbourhood_url, room_id); mgr.nodes_for_room(&composite) }
+            Some(mgr) => {
+                // Try both local UUID and shared namespace
+                let local_composite = format!("{}:{}", neighbourhood_url, room_id);
+                let result = mgr.nodes_for_room(&local_composite);
+                if !result.is_empty() {
+                    return result;
+                }
+                // Try with shared namespace
+                let l2s = self.local_to_shared.read().await;
+                if let Some(shared) = l2s.get(neighbourhood_url) {
+                    let shared_composite = format!("{}:{}", shared, room_id);
+                    mgr.nodes_for_room(&shared_composite)
+                } else {
+                    result
+                }
+            }
             None => Vec::new(),
         }
     }
@@ -615,10 +660,21 @@ impl SfuService {
             .map(|r| r.participant_count() as u32)
             .unwrap_or(0);
 
+        // Use shared namespace for cascade signals so all nodes use the same room_id
+        let shared_nh = {
+            let l2s = self.local_to_shared.read().await;
+            l2s.get(neighbourhood_url).cloned()
+        };
+        let cascade_room_id = if let Some(ref shared) = shared_nh {
+            RoomId::new(shared.as_str(), room_name)
+        } else {
+            room_id.clone()
+        };
+
         let signal = {
             let cascade = self.cascade_manager.read().await;
             match &*cascade {
-                Some(mgr) => mgr.announce_sfu_node(&room_id, local_count),
+                Some(mgr) => mgr.announce_sfu_node(&cascade_room_id, local_count),
                 None => return Err("Cascade manager not initialized — set mode to 'cascaded' first".to_string()),
             }
         };
@@ -685,9 +741,15 @@ impl SfuService {
             super::cascade::CascadeSignal::Announce { did, room_id, participant_count, capacity_hint } => {
                 mgr.handle_sfu_announce(did.clone(), room_id.clone(), participant_count, capacity_hint);
                 
-                // Auto-establish pipe transport if we have participants in the same room
+                // Auto-establish pipe transport if we have participants in the same room.
+                // Translate shared namespace back to local perspective UUID for room lookup.
                 let (nh_url, room_name) = room_id.rsplit_once(':').unwrap_or((&room_id, "default"));
-                let local_room_id = super::room::RoomId::new(nh_url, room_name);
+                let local_nh = {
+                    let s2l = self.shared_to_local.read().await;
+                    s2l.get(nh_url).cloned()
+                };
+                let local_nh_url = local_nh.as_deref().unwrap_or(nh_url);
+                let local_room_id = super::room::RoomId::new(local_nh_url, room_name);
                 let rooms = self.rooms.read().await;
                 let local_has_participants = rooms.get_room(&local_room_id)
                     .map(|r| r.participant_count() > 0)
@@ -714,11 +776,17 @@ impl SfuService {
                 // Extract the Rtc for the server event loop
                 if let Some((rtc, pipe_tracks)) = mgr.take_pipe_rtc(&room_id, &from_did) {
                     let (nh_url, room_name) = room_id.rsplit_once(':').unwrap_or((&room_id, "default"));
+                    // Translate shared namespace to local perspective UUID
+                    let local_nh = {
+                        let s2l = self.shared_to_local.read().await;
+                        s2l.get(nh_url).cloned()
+                    };
+                    let local_nh_url = local_nh.as_deref().unwrap_or(nh_url);
                     let pid = ParticipantId::next();
                     info!("SFU: creating pipe peer {} with pre-populated tracks: {:?}", pid, pipe_tracks);
                     let peer = SfuPeer {
                         id: pid,
-                        room_id: RoomId::new(nh_url, room_name),
+                        room_id: RoomId::new(local_nh_url, room_name),
                         agent_did: from_did.clone(),
                         rtc,
                         tracks_in: pipe_tracks,
@@ -731,19 +799,30 @@ impl SfuService {
                     let _ = self.server.command_tx.send(SfuCommand::AddPeer(peer)).await;
                 }
                 let (nh_url, _) = room_id.rsplit_once(':').unwrap_or((&room_id, ""));
+                // Use local namespace for config lookup when broadcasting
+                let local_nh_for_broadcast = {
+                    let s2l = self.shared_to_local.read().await;
+                    s2l.get(nh_url).cloned().unwrap_or_else(|| nh_url.to_string())
+                };
                 drop(cascade);
-                self.broadcast_cascade_signal(nh_url, &answer_signal).await
+                self.broadcast_cascade_signal(&local_nh_for_broadcast, &answer_signal).await
             }
             super::cascade::CascadeSignal::PipeAnswer { from_did, room_id, sdp_answer, .. } => {
                 mgr.handle_pipe_answer(&from_did, &room_id, &sdp_answer)?;
                 // Extract the Rtc for the server event loop
                 if let Some((rtc, pipe_tracks)) = mgr.take_pipe_rtc(&room_id, &from_did) {
                     let (nh_url, room_name) = room_id.rsplit_once(':').unwrap_or((&room_id, "default"));
+                    // Translate shared namespace to local perspective UUID
+                    let local_nh = {
+                        let s2l = self.shared_to_local.read().await;
+                        s2l.get(nh_url).cloned()
+                    };
+                    let local_nh_url = local_nh.as_deref().unwrap_or(nh_url);
                     let pid = ParticipantId::next();
                     info!("SFU: creating pipe peer {} with pre-populated tracks: {:?}", pid, pipe_tracks);
                     let peer = SfuPeer {
                         id: pid,
-                        room_id: RoomId::new(nh_url, room_name),
+                        room_id: RoomId::new(local_nh_url, room_name),
                         agent_did: from_did.clone(),
                         rtc,
                         tracks_in: pipe_tracks,
