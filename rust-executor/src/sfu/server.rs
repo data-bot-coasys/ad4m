@@ -177,50 +177,37 @@ impl SfuServer {
 
     /// For a given peer, add SendOnly media lines for each source track they don't have yet.
     /// Returns list of (mid, source_pid, kind) for newly added tracks.
-    fn add_missing_receive_tracks(
-        peer: &mut SfuPeer,
-        sources: &[(ParticipantId, String, Vec<(Mid, MediaKind)>)], // (pid, did, tracks)
-    ) -> Vec<(Mid, ParticipantId, Mid, MediaKind, String)> {
-        let mut added = Vec::new();
+    /// Determine which receive tracks are missing for this peer.
+    /// Returns a list of (source_pid, source_mid, kind, source_did) that need to be added.
+    fn find_missing_receive_tracks(
+        peer: &SfuPeer,
+        sources: &[(ParticipantId, String, Vec<(Mid, MediaKind)>)],
+    ) -> Vec<(ParticipantId, Mid, MediaKind, String)> {
+        let mut missing = Vec::new();
 
         for (source_pid, source_did, source_tracks) in sources {
             if *source_pid == peer.id {
-                continue; // Don't add tracks from self
+                continue;
             }
             for (source_mid, kind) in source_tracks {
                 let key = (source_pid.clone(), *kind);
                 if peer.outgoing_tracks.contains_key(&key) {
-                    continue; // Already have a track for this source+kind
+                    continue;
                 }
-
-                // Add a SendOnly media line to this peer's Rtc
-                let new_mid = peer.rtc.sdp_api().add_media(
-                    *kind,
-                    Direction::SendOnly,
-                    None,
-                    None,
-                    None,
-                );
-
-                peer.outgoing_tracks.insert(key, new_mid);
-                peer.tracks_out.insert(new_mid, (source_pid.clone(), *source_mid));
-
-                added.push((new_mid, source_pid.clone(), *source_mid, *kind, source_did.clone()));
-                info!(
-                    "SFU: added SendOnly {} mid={} to peer {} for source peer {} mid={}",
-                    match kind { MediaKind::Audio => "audio", MediaKind::Video => "video" },
-                    new_mid, peer.id, source_pid, source_mid
-                );
+                missing.push((source_pid.clone(), *source_mid, *kind, source_did.clone()));
             }
         }
 
-        added
+        missing
     }
+
+
 
     /// Generate a server offer for a peer (after adding tracks) and publish it.
     /// Stores the pending offer on the peer.
     fn generate_and_publish_offer(peer: &mut SfuPeer, track_mappings: Vec<String>) {
         let prev_pending = peer.pending_offer.take();
+        let had_pending = prev_pending.is_some();
         let mut api = peer.rtc.sdp_api();
 
         // If there's an existing pending offer, merge it
@@ -228,6 +215,8 @@ impl SfuServer {
             api.merge(prev);
         }
 
+        info!("SFU: attempting to generate offer for peer {} with {} track mappings, has_pending={}", 
+            peer.id, track_mappings.len(), had_pending);
         match api.apply() {
             Some((offer, pending)) => {
                 peer.pending_offer = Some(pending);
@@ -254,7 +243,7 @@ impl SfuServer {
                 }
             }
             None => {
-                debug!("SFU: no changes to apply for peer {} — no offer generated", peer.id);
+                info!("SFU: no changes to apply for peer {} — no offer generated", peer.id);
             }
         }
     }
@@ -275,7 +264,7 @@ impl SfuServer {
             })
             .collect();
 
-        // For each peer in the room, add missing receive tracks
+        // For each peer in the room, find and add missing receive tracks
         let peer_ids: Vec<ParticipantId> = peers.iter()
             .filter(|(_, p)| &p.room_id == room_id && !p.is_pipe_transport)
             .map(|(pid, _)| pid.clone())
@@ -287,16 +276,59 @@ impl SfuServer {
                 None => continue,
             };
 
-            let added = Self::add_missing_receive_tracks(peer, &sources);
+            let missing = Self::find_missing_receive_tracks(peer, &sources);
+            info!("SFU: renegotiate_room for peer {} - {} missing receive tracks", pid, missing.len());
 
-            if !added.is_empty() {
-                let track_mappings: Vec<String> = added.iter()
+            if !missing.is_empty() {
+                // Use a single SdpApi for adding tracks AND applying the offer
+                let prev_pending = peer.pending_offer.take();
+                let had_pending = prev_pending.is_some();
+                
+                // Phase 1: Create SdpApi, add media lines, apply → get offer
+                // We can't update peer tracking maps while SdpApi borrows peer.rtc,
+                // so we collect (new_mid, source info) from the api calls first.
+                let mut api = peer.rtc.sdp_api();
+                if let Some(prev) = prev_pending {
+                    api.merge(prev);
+                }
+
+                let mut new_mids: Vec<(Mid, ParticipantId, Mid, MediaKind, String)> = Vec::new();
+                for (source_pid, source_mid, kind, source_did) in &missing {
+                    let new_mid = api.add_media(
+                        *kind,
+                        Direction::SendOnly,
+                        None,
+                        None,
+                        None,
+                    );
+                    new_mids.push((new_mid, source_pid.clone(), *source_mid, *kind, source_did.clone()));
+                    info!(
+                        "SFU: added SendOnly {} mid={} to peer {} for source peer {} mid={}",
+                        match kind { MediaKind::Audio => "audio", MediaKind::Video => "video" },
+                        new_mid, peer.id, source_pid, source_mid
+                    );
+                }
+
+                info!("SFU: attempting to generate offer for peer {} with {} new tracks, has_pending={}",
+                    peer.id, new_mids.len(), had_pending);
+                let apply_result = api.apply();
+                // api is consumed by apply(), peer.rtc borrow is released
+
+                // Phase 2: Update tracking maps (now safe to borrow peer mutably)
+                for (new_mid, source_pid, source_mid, kind, _source_did) in &new_mids {
+                    let key = (source_pid.clone(), *kind);
+                    peer.outgoing_tracks.insert(key, *new_mid);
+                    peer.tracks_out.insert(*new_mid, (source_pid.clone(), *source_mid));
+                }
+
+                // Build track mappings
+                let track_mappings: Vec<String> = new_mids.iter()
                     .map(|(mid, _src_pid, _src_mid, kind, src_did)| {
                         format_track_mapping(mid, src_did, *kind)
                     })
                     .collect();
 
-                // Also include previously mapped tracks in the mapping
+                // Include previously mapped tracks
                 let mut all_mappings = track_mappings;
                 for (out_mid, (src_pid, _src_mid)) in &peer.tracks_out {
                     if let Some(src) = sources.iter().find(|(p, _, _)| p == src_pid) {
@@ -312,7 +344,33 @@ impl SfuServer {
                     }
                 }
 
-                Self::generate_and_publish_offer(peer, all_mappings);
+                // Phase 3: Process apply result
+                match apply_result {
+                    Some((offer, pending)) => {
+                        peer.pending_offer = Some(pending);
+                        let offer_json = match serde_json::to_string(&offer) {
+                            Ok(j) => j,
+                            Err(e) => {
+                                error!("SFU: failed to serialize server offer: {}", e);
+                                continue;
+                            }
+                        };
+                        let event = super::graphql_types::types::RenegotiationOfferEvent {
+                            room_id: peer.room_id.to_string(),
+                            agent_did: peer.agent_did.clone(),
+                            sdp_offer: offer_json,
+                            track_mapping: all_mappings,
+                        };
+                        if let Ok(json) = serde_json::to_string(&event) {
+                            info!("SFU: publishing server offer to peer {} ({}) with {} track mappings",
+                                peer.id, peer.agent_did, event.track_mapping.len());
+                            get_global_pubsub_sync().publish_sync(&SFU_RENEGOTIATION_OFFER_TOPIC, &json);
+                        }
+                    }
+                    None => {
+                        info!("SFU: no changes to apply for peer {} — no offer generated", peer.id);
+                    }
+                }
             }
         }
 
@@ -328,18 +386,52 @@ impl SfuServer {
                 None => continue,
             };
 
-            let added = Self::add_missing_receive_tracks(peer, &sources);
-            if !added.is_empty() {
-                // For pipe transports, we also need to generate an offer
-                // but pipe transports don't go through pubsub - they use cascade signaling
-                // For now, generate the offer and the cascade layer handles it
-                let track_mappings: Vec<String> = added.iter()
+            let missing = Self::find_missing_receive_tracks(peer, &sources);
+            if !missing.is_empty() {
+                let prev_pending = peer.pending_offer.take();
+                let mut api = peer.rtc.sdp_api();
+                if let Some(prev) = prev_pending {
+                    api.merge(prev);
+                }
+                let mut new_mids: Vec<(Mid, ParticipantId, Mid, MediaKind, String)> = Vec::new();
+                for (source_pid, source_mid, kind, source_did) in &missing {
+                    let new_mid = api.add_media(*kind, Direction::SendOnly, None, None, None);
+                    new_mids.push((new_mid, source_pid.clone(), *source_mid, *kind, source_did.clone()));
+                }
+                let apply_result = api.apply();
+
+                for (new_mid, source_pid, source_mid, kind, _) in &new_mids {
+                    peer.outgoing_tracks.insert((source_pid.clone(), *kind), *new_mid);
+                    peer.tracks_out.insert(*new_mid, (source_pid.clone(), *source_mid));
+                }
+                let track_mappings: Vec<String> = new_mids.iter()
                     .map(|(mid, _src_pid, _src_mid, kind, src_did)| {
                         format_track_mapping(mid, src_did, *kind)
                     })
                     .collect();
 
-                Self::generate_and_publish_offer(peer, track_mappings);
+                match apply_result {
+                    Some((offer, pending)) => {
+                        peer.pending_offer = Some(pending);
+                        let offer_json = match serde_json::to_string(&offer) {
+                            Ok(j) => j,
+                            Err(e) => {
+                                error!("SFU: failed to serialize pipe offer: {}", e);
+                                continue;
+                            }
+                        };
+                        let event = super::graphql_types::types::RenegotiationOfferEvent {
+                            room_id: peer.room_id.to_string(),
+                            agent_did: peer.agent_did.clone(),
+                            sdp_offer: offer_json,
+                            track_mapping: track_mappings,
+                        };
+                        if let Ok(json) = serde_json::to_string(&event) {
+                            get_global_pubsub_sync().publish_sync(&SFU_RENEGOTIATION_OFFER_TOPIC, &json);
+                        }
+                    }
+                    None => {}
+                }
             }
         }
     }
