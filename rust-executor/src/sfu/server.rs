@@ -391,8 +391,7 @@ impl SfuServer {
                             _ => {}
                         },
                         Err(e) => {
-                            warn!("SFU: peer {} poll error: {:?}", pid, e);
-                            peer.rtc.disconnect();
+                            debug!("SFU: peer {} poll error (non-fatal): {:?}", pid, e);
                             break;
                         }
                     }
@@ -471,6 +470,11 @@ impl SfuServer {
                                     target_pid, mid, e
                                 );
                             }
+                        } else {
+                            debug!(
+                                "SFU: writer() returned None for peer {} mid {} — direction may not allow sending",
+                                target_pid, mid
+                            );
                         }
                     } else if target_peer.is_pipe_transport {
                         debug!(
@@ -521,10 +525,10 @@ impl SfuServer {
                                 );
 
                                 // Demultiplex: find which peer accepts this packet
-                                if let Some((_pid, peer)) = peers.iter_mut().find(|(_, p)| p.rtc.accepts(&input)) {
+                                if let Some((pid, peer)) = peers.iter_mut().find(|(_, p)| p.rtc.accepts(&input)) {
                                     if let Err(e) = peer.rtc.handle_input(input) {
-                                        warn!("SFU: peer input error: {:?}", e);
-                                        peer.rtc.disconnect();
+                                        // NoSenderSource and similar are transient — do NOT disconnect
+                                        debug!("SFU: peer {} input error (non-fatal): {:?}", pid, e);
                                     }
                                 }
                             }
