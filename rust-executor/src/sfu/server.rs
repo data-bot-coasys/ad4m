@@ -440,18 +440,59 @@ impl SfuServer {
                             relay.remove_participant(&pid);
                             quality_preferences.remove(&pid);
 
-                            // Remove outgoing tracks that pointed to this departed peer
-                            // and schedule renegotiation (peers need to know tracks are gone)
-                            for (_, other_peer) in peers.iter_mut() {
-                                if other_peer.room_id == room_id {
-                                    other_peer.tracks_out.retain(|_, (src_pid, _)| *src_pid != pid);
-                                    other_peer.outgoing_tracks.retain(|(src_pid, _), _| *src_pid != pid);
+                            // Remove outgoing tracks that pointed to this departed peer,
+                            // mark their mids as inactive, and schedule renegotiation
+                            let mut peers_needing_offer: Vec<ParticipantId> = Vec::new();
+                            for (other_pid, other_peer) in peers.iter_mut() {
+                                if other_peer.room_id == room_id && !other_peer.is_pipe_transport {
+                                    // Find mids that pointed to the departed peer
+                                    let departed_mids: Vec<Mid> = other_peer.tracks_out.iter()
+                                        .filter(|(_, (src_pid, _))| *src_pid == pid)
+                                        .map(|(mid, _)| *mid)
+                                        .collect();
+                                    
+                                    if !departed_mids.is_empty() {
+                                        // Mark departed mids as inactive in SDP
+                                        for mid in &departed_mids {
+                                            other_peer.rtc.sdp_api().set_direction(*mid, Direction::Inactive);
+                                        }
+                                        
+                                        // Remove from tracking maps
+                                        other_peer.tracks_out.retain(|_, (src_pid, _)| *src_pid != pid);
+                                        other_peer.outgoing_tracks.retain(|(src_pid, _), _| *src_pid != pid);
+                                        
+                                        peers_needing_offer.push(other_pid.clone());
+                                    }
                                 }
                             }
-
-                            // TODO: For proper cleanup, we should mark departed peer's
-                            // outgoing mids as inactive via renegotiation. For now, the
-                            // tracks just go silent. Full renegotiation on leave is a future enhancement.
+                            
+                            // Collect DID map for track mapping generation (avoids borrow conflict)
+                            let did_map: HashMap<ParticipantId, String> = peers.iter()
+                                .filter(|(_, p)| p.room_id == room_id)
+                                .map(|(pid, p)| (pid.clone(), p.agent_did.clone()))
+                                .collect();
+                            
+                            // Generate renegotiation offers for affected peers
+                            for other_pid in peers_needing_offer {
+                                if let Some(other_peer) = peers.get_mut(&other_pid) {
+                                    // Build full track mapping for remaining tracks
+                                    let all_mappings: Vec<String> = other_peer.tracks_out.iter()
+                                        .filter_map(|(out_mid, (src_pid, _))| {
+                                            let kind = other_peer.outgoing_tracks.iter()
+                                                .find(|((p, _k), m)| p == src_pid && *m == out_mid)
+                                                .map(|((_, k), _)| *k);
+                                            let src_did = did_map.get(src_pid);
+                                            match (kind, src_did) {
+                                                (Some(k), Some(d)) => Some(format_track_mapping(out_mid, d, k)),
+                                                _ => None,
+                                            }
+                                        })
+                                        .collect();
+                                    
+                                    Self::generate_and_publish_offer(other_peer, all_mappings);
+                                    info!("SFU: departure renegotiation offer sent to peer {}", other_pid);
+                                }
+                            }
                         }
                     }
                     Ok(SfuCommand::SetQualityPreference { participant_id, preference }) => {
@@ -497,7 +538,30 @@ impl SfuServer {
                                     match peer.rtc.sdp_api().accept_answer(pending, sdp_answer) {
                                         Ok(()) => {
                                             info!("SFU: server offer answer accepted for peer {}", pid);
+                                            
+                                            // Collect keyframe targets before dropping the peer borrow
+                                            let keyframe_targets: Vec<(ParticipantId, Mid)> = peer.tracks_out.iter()
+                                                .filter_map(|(_, (src_pid, src_mid))| {
+                                                    peer.outgoing_tracks.iter()
+                                                        .find(|((p, k), _)| p == src_pid && *k == MediaKind::Video)
+                                                        .map(|_| (src_pid.clone(), *src_mid))
+                                                })
+                                                .collect();
+                                            
                                             let _ = response_tx.send(Ok(()));
+                                            
+                                            // Drop the peer borrow so we can borrow other peers
+                                            let _ = peer;
+                                            
+                                            // Request keyframes from source peers
+                                            for (src_pid, src_mid) in keyframe_targets {
+                                                if let Some(src_peer) = peers.get_mut(&src_pid) {
+                                                    if let Some(mut writer) = src_peer.rtc.writer(src_mid) {
+                                                        info!("SFU: requesting post-answer keyframe from peer {} mid={}", src_pid, src_mid);
+                                                        let _ = writer.request_keyframe(None, KeyframeRequestKind::Pli);
+                                                    }
+                                                }
+                                            }
                                         }
                                         Err(e) => {
                                             error!("SFU: failed to accept server offer answer for peer {}: {}", pid, e);
@@ -644,10 +708,11 @@ impl SfuServer {
             }
 
             // If new tracks appeared, trigger renegotiation for their rooms
+            // (skip rooms already renegotiated this tick from AddPeer)
             if !new_tracks.is_empty() {
                 let mut rooms_needing_reneg: Vec<RoomId> = Vec::new();
                 for (_, room_id, _, _) in &new_tracks {
-                    if !rooms_needing_reneg.contains(room_id) {
+                    if !rooms_needing_reneg.contains(room_id) && !rooms_to_renegotiate.contains(room_id) {
                         rooms_needing_reneg.push(room_id.clone());
                     }
                 }
