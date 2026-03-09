@@ -375,6 +375,40 @@ export class NeighbourhoodClient {
         return callSetQualityPreference
     }
 
+    async callAnswerServerOffer(neighbourhoodUrl: string, roomId: string, sdpAnswer: string): Promise<boolean> {
+        const { callAnswerServerOffer } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation callAnswerServerOffer($neighbourhoodUrl: String!, $roomId: String!, $sdpAnswer: String!) {
+                callAnswerServerOffer(neighbourhoodUrl: $neighbourhoodUrl, roomId: $roomId, sdpAnswer: $sdpAnswer)
+            }`,
+            variables: { neighbourhoodUrl, roomId, sdpAnswer }
+        }))
+        return callAnswerServerOffer
+    }
+
+    subscribeCallRenegotiationOffer(agentDid: string, callback: (event: { roomId: string, agentDid: string, sdpOffer: string, trackMapping: string[] }) => void): { unsubscribe: () => void } {
+        const subscription = this.#apolloClient.subscribe({
+            query: gql`subscription callRenegotiationOffer($agentDid: String!) {
+                callRenegotiationOffer(agentDid: $agentDid) {
+                    roomId
+                    agentDid
+                    sdpOffer
+                    trackMapping
+                }
+            }`,
+            variables: { agentDid }
+        }).subscribe({
+            next: (result: any) => {
+                if (result.data?.callRenegotiationOffer) {
+                    callback(result.data.callRenegotiationOffer);
+                }
+            },
+            error: (err: any) => {
+                console.error('callRenegotiationOffer subscription error:', err);
+            }
+        });
+        return subscription;
+    }
+
     async sfuRooms(): Promise<SfuRoom[]> {
         const { sfuRooms } = unwrapApolloResult(await this.#apolloClient.query({
             query: gql`query sfuRooms {

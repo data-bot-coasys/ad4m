@@ -594,4 +594,23 @@ impl Subscription {
         )
         .await
     }
+
+    /// Subscribe to server-initiated SDP renegotiation offers.
+    /// The server sends offers when peers join/leave and new tracks need to be established.
+    /// Filter by agent_did so each client only receives their own offers.
+    #[cfg(feature = "sfu")]
+    async fn call_renegotiation_offer(
+        &self,
+        _context: &RequestContext,
+        agent_did: String,
+    ) -> Pin<Box<dyn Stream<Item = FieldResult<crate::sfu::graphql_types::types::RenegotiationOfferEvent>> + Send>> {
+        use crate::pubsub::SFU_RENEGOTIATION_OFFER_TOPIC;
+        let pubsub = get_global_pubsub().await;
+        subscribe_and_process::<crate::sfu::graphql_types::types::RenegotiationOfferEvent>(
+            pubsub,
+            SFU_RENEGOTIATION_OFFER_TOPIC.to_string(),
+            Some(agent_did),
+        )
+        .await
+    }
 }

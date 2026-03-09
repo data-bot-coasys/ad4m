@@ -89,6 +89,15 @@ export class NeighbourhoodProxy {
         return await this.#client.callSetQualityPreference(url, roomId, preference)
     }
 
+    async callAnswerServerOffer(roomId: string, sdpAnswer: string): Promise<boolean> {
+        const url = await this.#getNeighbourhoodUrl()
+        return await this.#client.callAnswerServerOffer(url, roomId, sdpAnswer)
+    }
+
+    subscribeCallRenegotiationOffer(agentDid: string, callback: (event: { roomId: string, agentDid: string, sdpOffer: string, trackMapping: string[] }) => void): { unsubscribe: () => void } {
+        return this.#client.subscribeCallRenegotiationOffer(agentDid, callback)
+    }
+
     async sfuPeer(): Promise<string | null> {
         const url = await this.#getNeighbourhoodUrl()
         return await this.#client.sfuPeerForNeighbourhood(url)

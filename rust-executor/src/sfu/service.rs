@@ -6,16 +6,13 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
-
-use log::{error, info, warn};
+use log::{info, warn};
 use once_cell::sync::OnceCell;
 use str0m::change::SdpOffer;
-use str0m::Rtc;
 use tokio::sync::{RwLock, oneshot};
 
 use super::cascade::CascadeManager;
-use super::room::{ParticipantId, ParticipantInfo, RoomError, RoomId, RoomManager, SfuRoom};
+use super::room::{ParticipantId, RoomError, RoomId, RoomManager, SfuRoom};
 use super::server::{SfuCommand, SfuPeer, SfuServer, SfuServerConfig};
 
 /// Global SFU service instance.
@@ -295,6 +292,8 @@ impl SfuService {
             tracks_out: HashMap::new(),
             is_pipe_transport: false,
             pipe_remote_did: None,
+            outgoing_tracks: HashMap::new(),
+            pending_offer: None,
         };
 
         self.server
@@ -395,6 +394,38 @@ impl SfuService {
             redirect_to: None,
             stream_mapping: Vec::new(),
         })
+    }
+
+    /// Answer a server-initiated SDP offer (from renegotiation when peers join/leave).
+    pub async fn call_answer_server_offer(
+        &self,
+        neighbourhood_url: &str,
+        room_name: &str,
+        agent_did: &str,
+        sdp_answer_json: &str,
+    ) -> Result<bool, String> {
+        let room_id = RoomId::new(neighbourhood_url, room_name);
+
+        let answer: str0m::change::SdpAnswer = serde_json::from_str(sdp_answer_json)
+            .map_err(|e| format!("Invalid SDP answer: {}", e))?;
+
+        let (response_tx, response_rx) = oneshot::channel();
+
+        self.server.command_tx
+            .send(SfuCommand::AnswerServerOffer {
+                agent_did: agent_did.to_string(),
+                room_id,
+                sdp_answer: answer,
+                response_tx,
+            })
+            .await
+            .map_err(|e| format!("Failed to send answer command: {}", e))?;
+
+        response_rx.await
+            .map_err(|_| "Answer response channel closed".to_string())?
+            .map_err(|e| e)?;
+
+        Ok(true)
     }
 
     /// Leave a call.
@@ -694,6 +725,8 @@ impl SfuService {
                         tracks_out: HashMap::new(),
                         is_pipe_transport: true,
                         pipe_remote_did: Some(from_did.clone()),
+                        outgoing_tracks: HashMap::new(),
+                        pending_offer: None,
                     };
                     let _ = self.server.command_tx.send(SfuCommand::AddPeer(peer)).await;
                 }
@@ -717,6 +750,8 @@ impl SfuService {
                         tracks_out: HashMap::new(),
                         is_pipe_transport: true,
                         pipe_remote_did: Some(from_did.clone()),
+                        outgoing_tracks: HashMap::new(),
+                        pending_offer: None,
                     };
                     let _ = self.server.command_tx.send(SfuCommand::AddPeer(peer)).await;
                 }

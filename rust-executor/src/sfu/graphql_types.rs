@@ -97,4 +97,34 @@ pub mod types {
             Some(self.room_id.clone())
         }
     }
+
+    /// Server-initiated SDP renegotiation offer event.
+    /// Published to clients when new tracks need to be added (peer join)
+    /// or removed (peer leave).
+    #[derive(GraphQLObject, Debug, Clone, serde::Serialize, serde::Deserialize)]
+    pub struct RenegotiationOfferEvent {
+        /// The room ID (format: "neighbourhood_url:room_name")
+        pub room_id: String,
+        /// The DID of the peer this offer is for (targeted delivery)
+        pub agent_did: String,
+        /// The SDP offer JSON string
+        pub sdp_offer: String,
+        /// Track mapping entries, each formatted as "mid:ownerDid:kind"
+        /// e.g. "3:did:key:z6MkABC:audio", "4:did:key:z6MkABC:video"
+        pub track_mapping: Vec<String>,
+    }
+
+    impl crate::graphql::graphql_types::GetValue for RenegotiationOfferEvent {
+        type Value = RenegotiationOfferEvent;
+        fn get_value(&self) -> Self::Value {
+            self.clone()
+        }
+    }
+
+    impl crate::graphql::graphql_types::GetFilter for RenegotiationOfferEvent {
+        fn get_filter(&self) -> Option<String> {
+            // Filter by agent_did so each client only receives their own offers
+            Some(self.agent_did.clone())
+        }
+    }
 }

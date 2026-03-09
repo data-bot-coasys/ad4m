@@ -135,6 +135,7 @@ lazy_static::lazy_static! {
     // SFU topics
     pub static ref SFU_CALL_PARTICIPANTS_TOPIC: String = "sfu-call-participants-topic".to_owned();
     pub static ref SFU_CALL_STREAMS_TOPIC: String = "sfu-call-streams-topic".to_owned();
+    pub static ref SFU_RENEGOTIATION_OFFER_TOPIC: String = "sfu-renegotiation-offer-topic".to_owned();
 }
 
 pub async fn get_global_pubsub() -> Arc<PubSub> {

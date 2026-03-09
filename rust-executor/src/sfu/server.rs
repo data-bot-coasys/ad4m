@@ -7,8 +7,8 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use log::{debug, error, info, warn};
-use str0m::change::SdpOffer;
-use str0m::media::{KeyframeRequest, KeyframeRequestKind, MediaData, MediaKind, Mid};
+use str0m::change::{SdpAnswer, SdpOffer, SdpPendingOffer};
+use str0m::media::{Direction, KeyframeRequest, KeyframeRequestKind, MediaData, MediaKind, Mid};
 use str0m::net::Protocol;
 use str0m::{net::Receive, Candidate, Event, IceConnectionState, Input, Output, Rtc};
 use tokio::net::UdpSocket;
@@ -19,7 +19,12 @@ use super::relay::MediaRelay;
 use super::room::{ParticipantId, RoomId};
 
 #[cfg(feature = "sfu")]
-use crate::pubsub::{get_global_pubsub_sync, SFU_CALL_PARTICIPANTS_TOPIC, SFU_CALL_STREAMS_TOPIC};
+use crate::pubsub::{get_global_pubsub_sync, SFU_CALL_PARTICIPANTS_TOPIC, SFU_CALL_STREAMS_TOPIC, SFU_RENEGOTIATION_OFFER_TOPIC};
+
+/// Format a track mapping entry as "mid:ownerDid:kind"
+fn format_track_mapping(mid: &Mid, owner_did: &str, kind: MediaKind) -> String {
+    format!("{}:{}:{}", mid, owner_did, match kind { MediaKind::Audio => "audio", MediaKind::Video => "video" })
+}
 
 /// A connected WebRTC peer managed by the SFU server.
 #[derive(Debug)]
@@ -36,6 +41,10 @@ pub struct SfuPeer {
     pub is_pipe_transport: bool,
     /// The DID of the remote SFU node (only set for pipe transports)
     pub pipe_remote_did: Option<String>,
+    /// Tracks we've already created outgoing mids for: (source_pid, kind) → our outgoing mid
+    pub outgoing_tracks: HashMap<(ParticipantId, MediaKind), Mid>,
+    /// Pending SDP offer waiting for client answer
+    pub pending_offer: Option<SdpPendingOffer>,
 }
 
 /// Commands sent to the SFU event loop from the GraphQL API / signalling layer.
@@ -51,12 +60,19 @@ pub enum SfuCommand {
         /// "high", "medium", "low", or "auto"
         preference: String,
     },
-    /// Renegotiate SDP for an existing peer (track add/remove).
+    /// Renegotiate SDP for an existing peer (client-initiated, e.g. track add/remove).
     RenegotiatePeer {
         agent_did: String,
         room_id: RoomId,
         sdp_offer: SdpOffer,
         response_tx: oneshot::Sender<Result<String, String>>,
+    },
+    /// Client's answer to a server-initiated SDP offer.
+    AnswerServerOffer {
+        agent_did: String,
+        room_id: RoomId,
+        sdp_answer: SdpAnswer,
+        response_tx: oneshot::Sender<Result<(), String>>,
     },
     /// Shut down the SFU server.
     Shutdown,
@@ -135,7 +151,6 @@ impl SfuServer {
 
         // If bound to 0.0.0.0, resolve to actual network interface IP
         let resolved_addr = if local_addr.ip().is_unspecified() {
-            // Use UDP connect trick to find the default outbound IP
             let probe = std::net::UdpSocket::bind("0.0.0.0:0").ok()
                 .and_then(|s| { s.connect("8.8.8.8:80").ok()?; s.local_addr().ok() })
                 .map(|a| a.ip())
@@ -160,6 +175,175 @@ impl SfuServer {
         Ok((rtc, answer_json))
     }
 
+    /// For a given peer, add SendOnly media lines for each source track they don't have yet.
+    /// Returns list of (mid, source_pid, kind) for newly added tracks.
+    fn add_missing_receive_tracks(
+        peer: &mut SfuPeer,
+        sources: &[(ParticipantId, String, Vec<(Mid, MediaKind)>)], // (pid, did, tracks)
+    ) -> Vec<(Mid, ParticipantId, Mid, MediaKind, String)> {
+        let mut added = Vec::new();
+
+        for (source_pid, source_did, source_tracks) in sources {
+            if *source_pid == peer.id {
+                continue; // Don't add tracks from self
+            }
+            for (source_mid, kind) in source_tracks {
+                let key = (source_pid.clone(), *kind);
+                if peer.outgoing_tracks.contains_key(&key) {
+                    continue; // Already have a track for this source+kind
+                }
+
+                // Add a SendOnly media line to this peer's Rtc
+                let new_mid = peer.rtc.sdp_api().add_media(
+                    *kind,
+                    Direction::SendOnly,
+                    None,
+                    None,
+                    None,
+                );
+
+                peer.outgoing_tracks.insert(key, new_mid);
+                peer.tracks_out.insert(new_mid, (source_pid.clone(), *source_mid));
+
+                added.push((new_mid, source_pid.clone(), *source_mid, *kind, source_did.clone()));
+                info!(
+                    "SFU: added SendOnly {} mid={} to peer {} for source peer {} mid={}",
+                    match kind { MediaKind::Audio => "audio", MediaKind::Video => "video" },
+                    new_mid, peer.id, source_pid, source_mid
+                );
+            }
+        }
+
+        added
+    }
+
+    /// Generate a server offer for a peer (after adding tracks) and publish it.
+    /// Stores the pending offer on the peer.
+    fn generate_and_publish_offer(peer: &mut SfuPeer, track_mappings: Vec<String>) {
+        let prev_pending = peer.pending_offer.take();
+        let mut api = peer.rtc.sdp_api();
+
+        // If there's an existing pending offer, merge it
+        if let Some(prev) = prev_pending {
+            api.merge(prev);
+        }
+
+        match api.apply() {
+            Some((offer, pending)) => {
+                peer.pending_offer = Some(pending);
+
+                let offer_json = match serde_json::to_string(&offer) {
+                    Ok(j) => j,
+                    Err(e) => {
+                        error!("SFU: failed to serialize server offer: {}", e);
+                        return;
+                    }
+                };
+
+                let event = super::graphql_types::types::RenegotiationOfferEvent {
+                    room_id: peer.room_id.to_string(),
+                    agent_did: peer.agent_did.clone(),
+                    sdp_offer: offer_json,
+                    track_mapping: track_mappings,
+                };
+
+                if let Ok(json) = serde_json::to_string(&event) {
+                    info!("SFU: publishing server offer to peer {} ({}) with {} track mappings",
+                        peer.id, peer.agent_did, event.track_mapping.len());
+                    get_global_pubsub_sync().publish_sync(&SFU_RENEGOTIATION_OFFER_TOPIC, &json);
+                }
+            }
+            None => {
+                debug!("SFU: no changes to apply for peer {} — no offer generated", peer.id);
+            }
+        }
+    }
+
+    /// Perform renegotiation for all peers in a room. Called when a peer joins/leaves.
+    fn renegotiate_room(
+        peers: &mut HashMap<ParticipantId, SfuPeer>,
+        room_id: &RoomId,
+    ) {
+        // Collect all source tracks in the room: (pid, did, [(mid, kind)])
+        let sources: Vec<(ParticipantId, String, Vec<(Mid, MediaKind)>)> = peers.iter()
+            .filter(|(_, p)| &p.room_id == room_id)
+            .map(|(pid, p)| {
+                let tracks: Vec<(Mid, MediaKind)> = p.tracks_in.iter()
+                    .map(|(mid, kind)| (*mid, *kind))
+                    .collect();
+                (pid.clone(), p.agent_did.clone(), tracks)
+            })
+            .collect();
+
+        // For each peer in the room, add missing receive tracks
+        let peer_ids: Vec<ParticipantId> = peers.iter()
+            .filter(|(_, p)| &p.room_id == room_id && !p.is_pipe_transport)
+            .map(|(pid, _)| pid.clone())
+            .collect();
+
+        for pid in &peer_ids {
+            let peer = match peers.get_mut(pid) {
+                Some(p) => p,
+                None => continue,
+            };
+
+            let added = Self::add_missing_receive_tracks(peer, &sources);
+
+            if !added.is_empty() {
+                let track_mappings: Vec<String> = added.iter()
+                    .map(|(mid, _src_pid, _src_mid, kind, src_did)| {
+                        format_track_mapping(mid, src_did, *kind)
+                    })
+                    .collect();
+
+                // Also include previously mapped tracks in the mapping
+                let mut all_mappings = track_mappings;
+                for (out_mid, (src_pid, _src_mid)) in &peer.tracks_out {
+                    if let Some(src) = sources.iter().find(|(p, _, _)| p == src_pid) {
+                        let kind = peer.outgoing_tracks.iter()
+                            .find(|((_p, _k), m)| *m == out_mid)
+                            .map(|((_, k), _)| *k);
+                        if let Some(kind) = kind {
+                            let entry = format_track_mapping(out_mid, &src.1, kind);
+                            if !all_mappings.contains(&entry) {
+                                all_mappings.push(entry);
+                            }
+                        }
+                    }
+                }
+
+                Self::generate_and_publish_offer(peer, all_mappings);
+            }
+        }
+
+        // Also handle pipe transports
+        let pipe_ids: Vec<ParticipantId> = peers.iter()
+            .filter(|(_, p)| &p.room_id == room_id && p.is_pipe_transport)
+            .map(|(pid, _)| pid.clone())
+            .collect();
+
+        for pid in &pipe_ids {
+            let peer = match peers.get_mut(pid) {
+                Some(p) => p,
+                None => continue,
+            };
+
+            let added = Self::add_missing_receive_tracks(peer, &sources);
+            if !added.is_empty() {
+                // For pipe transports, we also need to generate an offer
+                // but pipe transports don't go through pubsub - they use cascade signaling
+                // For now, generate the offer and the cascade layer handles it
+                let track_mappings: Vec<String> = added.iter()
+                    .map(|(mid, _src_pid, _src_mid, kind, src_did)| {
+                        format_track_mapping(mid, src_did, *kind)
+                    })
+                    .collect();
+
+                Self::generate_and_publish_offer(peer, track_mappings);
+            }
+        }
+    }
+
     /// The main event loop. Reads UDP packets, drives str0m, and relays media.
     async fn event_loop(
         socket: UdpSocket,
@@ -170,6 +354,8 @@ impl SfuServer {
         let mut relay = MediaRelay::new();
         let mut quality_preferences: HashMap<ParticipantId, String> = HashMap::new();
         let mut buf = vec![0u8; 2000];
+        // Rooms that need renegotiation (deferred to end of command processing)
+        let mut rooms_to_renegotiate: Vec<RoomId> = Vec::new();
 
         // Resolve 0.0.0.0 to actual IP for ICE candidate matching
         let resolved_local_addr = if local_addr.ip().is_unspecified() {
@@ -184,6 +370,8 @@ impl SfuServer {
         info!("SFU event loop started on {} (resolved: {})", local_addr, resolved_local_addr);
 
         loop {
+            rooms_to_renegotiate.clear();
+
             // Process commands
             loop {
                 match command_rx.try_recv() {
@@ -214,12 +402,17 @@ impl SfuServer {
                             }
                         }
 
-                        // tracks_out are set up during SDP creation in call_join
+                        // Schedule room renegotiation (will happen after all commands processed)
+                        if !rooms_to_renegotiate.contains(&room_id) {
+                            rooms_to_renegotiate.push(room_id.clone());
+                        }
+
                         peers.insert(pid, peer);
                     }
                     Ok(SfuCommand::RemovePeer(pid)) => {
                         if let Some(peer) = peers.remove(&pid) {
-                            info!("SFU: peer {} left room {}", pid, peer.room_id);
+                            let room_id = peer.room_id.clone();
+                            info!("SFU: peer {} left room {}", pid, room_id);
                             // Publish participant left event (non-pipe only)
                             if !peer.is_pipe_transport {
                                 let event = super::graphql_types::types::CallParticipantEvent {
@@ -246,6 +439,19 @@ impl SfuServer {
                             }
                             relay.remove_participant(&pid);
                             quality_preferences.remove(&pid);
+
+                            // Remove outgoing tracks that pointed to this departed peer
+                            // and schedule renegotiation (peers need to know tracks are gone)
+                            for (_, other_peer) in peers.iter_mut() {
+                                if other_peer.room_id == room_id {
+                                    other_peer.tracks_out.retain(|_, (src_pid, _)| *src_pid != pid);
+                                    other_peer.outgoing_tracks.retain(|(src_pid, _), _| *src_pid != pid);
+                                }
+                            }
+
+                            // TODO: For proper cleanup, we should mark departed peer's
+                            // outgoing mids as inactive via renegotiation. For now, the
+                            // tracks just go silent. Full renegotiation on leave is a future enhancement.
                         }
                     }
                     Ok(SfuCommand::SetQualityPreference { participant_id, preference }) => {
@@ -279,6 +485,36 @@ impl SfuServer {
                             let _ = response_tx.send(Err(format!("No existing peer for DID {} in room {}", agent_did, room_id)));
                         }
                     }
+                    Ok(SfuCommand::AnswerServerOffer { agent_did, room_id, sdp_answer, response_tx }) => {
+                        let existing_pid = peers.iter()
+                            .find(|(_, p)| p.agent_did == agent_did && p.room_id == room_id)
+                            .map(|(pid, _)| pid.clone());
+
+                        if let Some(pid) = existing_pid {
+                            if let Some(peer) = peers.get_mut(&pid) {
+                                if let Some(pending) = peer.pending_offer.take() {
+                                    info!("SFU: applying server offer answer from peer {} (DID: {})", pid, agent_did);
+                                    match peer.rtc.sdp_api().accept_answer(pending, sdp_answer) {
+                                        Ok(()) => {
+                                            info!("SFU: server offer answer accepted for peer {}", pid);
+                                            let _ = response_tx.send(Ok(()));
+                                        }
+                                        Err(e) => {
+                                            error!("SFU: failed to accept server offer answer for peer {}: {}", pid, e);
+                                            let _ = response_tx.send(Err(format!("Failed to accept answer: {}", e)));
+                                        }
+                                    }
+                                } else {
+                                    warn!("SFU: no pending offer for peer {} — answer ignored", pid);
+                                    let _ = response_tx.send(Err("No pending server offer".to_string()));
+                                }
+                            } else {
+                                let _ = response_tx.send(Err("Peer not found".to_string()));
+                            }
+                        } else {
+                            let _ = response_tx.send(Err(format!("No peer for DID {} in room {}", agent_did, room_id)));
+                        }
+                    }
                     Ok(SfuCommand::Shutdown) => {
                         info!("SFU event loop shutting down");
                         return;
@@ -291,7 +527,13 @@ impl SfuServer {
                 }
             }
 
+            // Perform deferred room renegotiations
+            for room_id in &rooms_to_renegotiate {
+                Self::renegotiate_room(&mut peers, room_id);
+            }
+
             // Clean out disconnected peers
+            let mut disconnected_rooms: Vec<RoomId> = Vec::new();
             peers.retain(|pid, peer| {
                 if !peer.rtc.is_alive() {
                     info!("SFU: peer {} disconnected", pid);
@@ -304,7 +546,6 @@ impl SfuServer {
                         if let Ok(json) = serde_json::to_string(&event) {
                             get_global_pubsub_sync().publish_sync(&SFU_CALL_PARTICIPANTS_TOPIC, &json);
                         }
-                        // Publish stream removed events for all tracks from this peer
                         for kind in peer.tracks_in.values() {
                             let stream_event = super::graphql_types::types::CallStreamEvent {
                                 room_id: peer.room_id.to_string(),
@@ -317,6 +558,7 @@ impl SfuServer {
                             }
                         }
                     }
+                    disconnected_rooms.push(peer.room_id.clone());
                     relay.remove_participant(pid);
                     false
                 } else {
@@ -327,8 +569,8 @@ impl SfuServer {
             // Poll all peers for output
             let mut earliest_timeout = Instant::now() + Duration::from_millis(100);
             let mut media_to_relay: Vec<(ParticipantId, MediaData)> = Vec::new();
-
             let mut keyframe_requests: Vec<(ParticipantId, KeyframeRequest)> = Vec::new();
+            let mut new_tracks: Vec<(ParticipantId, RoomId, Mid, MediaKind)> = Vec::new();
 
             for (pid, peer) in peers.iter_mut() {
                 loop {
@@ -381,6 +623,9 @@ impl SfuServer {
                                 if let Ok(json) = serde_json::to_string(&stream_event) {
                                     get_global_pubsub_sync().publish_sync(&SFU_CALL_STREAMS_TOPIC, &json);
                                 }
+
+                                // Track new track for renegotiation
+                                new_tracks.push((pid.clone(), peer.room_id.clone(), e.mid, e.kind));
                             }
                             Event::MediaData(data) => {
                                 media_to_relay.push((pid.clone(), data));
@@ -398,6 +643,19 @@ impl SfuServer {
                 }
             }
 
+            // If new tracks appeared, trigger renegotiation for their rooms
+            if !new_tracks.is_empty() {
+                let mut rooms_needing_reneg: Vec<RoomId> = Vec::new();
+                for (_, room_id, _, _) in &new_tracks {
+                    if !rooms_needing_reneg.contains(room_id) {
+                        rooms_needing_reneg.push(room_id.clone());
+                    }
+                }
+                for room_id in &rooms_needing_reneg {
+                    Self::renegotiate_room(&mut peers, room_id);
+                }
+            }
+
             // Relay media data to other peers in the same room
             for (origin_pid, data) in &media_to_relay {
                 let origin_room = match peers.get(origin_pid) {
@@ -410,7 +668,6 @@ impl SfuServer {
                     relay.update_voice_activity(origin_pid, data);
                 }
 
-                // Cache origin pipe info before the mutable borrow loop
                 let origin_is_pipe = peers.get(origin_pid).map(|p| p.is_pipe_transport).unwrap_or(false);
                 let origin_pipe_did = peers.get(origin_pid).and_then(|p| p.pipe_remote_did.clone());
 
@@ -437,7 +694,7 @@ impl SfuServer {
                             let skip = match pref {
                                 "low" => rid_str != "low" && rid_str != "q",
                                 "medium" => rid_str == "high" || rid_str == "f",
-                                _ => false, // "high" and "auto" forward all
+                                _ => false,
                             };
                             if skip {
                                 continue;
@@ -445,22 +702,25 @@ impl SfuServer {
                         }
                     }
 
-                    // Find a matching mid on the target peer to forward the media
-                    // For audio: use the target peer's audio mid (sendrecv allows bidirectional)
-                    // For video: use the target peer's video mid if present
-                    let target_mid = if data.params.spec().codec.is_audio() {
-                        target_peer.tracks_in.iter()
-                            .find(|(_, kind)| matches!(kind, MediaKind::Audio))
-                            .map(|(mid, _)| *mid)
-                    } else {
-                        // For video, try tracks_out first (explicit mapping), then fall back to video mid
-                        target_peer.tracks_out.iter()
-                            .find(|(_, (src_pid, src_mid))| src_pid == origin_pid && *src_mid == data.mid)
-                            .map(|(out_mid, _)| *out_mid)
-                            .or_else(|| target_peer.tracks_in.iter()
-                                .find(|(_, kind)| matches!(kind, MediaKind::Video))
-                                .map(|(mid, _)| *mid))
-                    };
+                    // Find the correct outgoing mid for this source track
+                    let target_mid = target_peer.tracks_out.iter()
+                        .find(|(_, (src_pid, src_mid))| src_pid == origin_pid && *src_mid == data.mid)
+                        .map(|(out_mid, _)| *out_mid);
+
+                    // Fallback: for audio, try any audio out track mapped to origin
+                    let target_mid = target_mid.or_else(|| {
+                        if data.params.spec().codec.is_audio() {
+                            // Look for an outgoing audio track mapped to origin_pid
+                            target_peer.outgoing_tracks.iter()
+                                .find(|((src_pid, kind), _)| src_pid == origin_pid && *kind == MediaKind::Audio)
+                                .map(|(_, mid)| *mid)
+                        } else {
+                            // Look for an outgoing video track mapped to origin_pid
+                            target_peer.outgoing_tracks.iter()
+                                .find(|((src_pid, kind), _)| src_pid == origin_pid && *kind == MediaKind::Video)
+                                .map(|(_, mid)| *mid)
+                        }
+                    });
 
                     if let Some(mid) = target_mid {
                         if let Some(writer) = target_peer.rtc.writer(mid) {
@@ -472,14 +732,15 @@ impl SfuServer {
                             }
                         } else {
                             debug!(
-                                "SFU: writer() returned None for peer {} mid {} — direction may not allow sending",
+                                "SFU: writer() returned None for peer {} mid {} — direction may not allow sending or answer not yet received",
                                 target_pid, mid
                             );
                         }
-                    } else if target_peer.is_pipe_transport {
+                    } else {
+                        // No track mapping yet — this can happen before renegotiation completes
                         debug!(
-                            "SFU: no target mid for pipe peer {} (tracks_in: {:?}), cannot forward {:?} from {}",
-                            target_pid, target_peer.tracks_in, if data.params.spec().codec.is_audio() { "audio" } else { "video" }, origin_pid
+                            "SFU: no outgoing track for peer {} to receive from {} — renegotiation may be pending",
+                            target_pid, origin_pid
                         );
                     }
                 }
@@ -492,15 +753,13 @@ impl SfuServer {
                     None => continue,
                 };
 
-                // The keyframe request is for an outgoing track on the requesting peer.
-                // Find which origin peer owns that track.
                 if let Some((origin_pid, origin_mid)) =
                     requesting_peer.tracks_out.get(&req.mid).cloned()
                 {
                     if let Some(origin_peer) = peers.get_mut(&origin_pid) {
                         if let Some(mut writer) = origin_peer.rtc.writer(origin_mid) {
-                        let _ = writer.request_keyframe(None, KeyframeRequestKind::Pli);
-                    }
+                            let _ = writer.request_keyframe(None, KeyframeRequestKind::Pli);
+                        }
                     }
                 }
             }
@@ -524,10 +783,8 @@ impl SfuServer {
                                     },
                                 );
 
-                                // Demultiplex: find which peer accepts this packet
                                 if let Some((pid, peer)) = peers.iter_mut().find(|(_, p)| p.rtc.accepts(&input)) {
                                     if let Err(e) = peer.rtc.handle_input(input) {
-                                        // NoSenderSource and similar are transient — do NOT disconnect
                                         debug!("SFU: peer {} input error (non-fatal): {:?}", pid, e);
                                     }
                                 }
@@ -535,7 +792,6 @@ impl SfuServer {
                         }
                         Err(e) => {
                             if e.kind() == std::io::ErrorKind::WouldBlock {
-                                // Non-blocking mode, expected
                             } else {
                                 error!("SFU: UDP recv error: {:?}", e);
                             }
@@ -543,7 +799,6 @@ impl SfuServer {
                     }
                 }
                 _ = tokio::time::sleep(duration) => {
-                    // Timeout — drive all peers forward
                 }
             }
 

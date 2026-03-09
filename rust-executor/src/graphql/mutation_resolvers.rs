@@ -3167,6 +3167,25 @@ impl Mutation {
             .map_err(|e| FieldError::new(e, Value::null()))
     }
 
+    /// Answer a server-initiated SDP offer (sent when peers join/leave).
+    #[cfg(feature = "sfu")]
+    async fn call_answer_server_offer(
+        _context: &RequestContext,
+        neighbourhood_url: String,
+        room_id: String,
+        sdp_answer: String,
+    ) -> FieldResult<bool> {
+        use crate::sfu::get_sfu_service;
+
+        let service = get_sfu_service()
+            .ok_or_else(|| FieldError::new("SFU service not available", Value::null()))?;
+
+        let agent_did = crate::agent::did();
+
+        service.call_answer_server_offer(&neighbourhood_url, &room_id, &agent_did, &sdp_answer).await
+            .map_err(|e| FieldError::new(e, Value::null()))
+    }
+
     #[cfg(feature = "sfu")]
     async fn sfu_set_config(
         context: &RequestContext,
