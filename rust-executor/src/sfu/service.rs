@@ -541,7 +541,7 @@ impl SfuService {
             .or_else(|| configs.get("global"));
         config.and_then(|c| match c.mode.as_str() {
                 "designated" => c.designated_peer.clone(),
-                "gateway" => Some("gateway".to_string()), // Sentinel — caller resolves gateway DID
+                "gateway" | "cascaded" => Some("gateway".to_string()), // Sentinel — caller resolves gateway DID
                 _ => None,
             })
     }
