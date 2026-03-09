@@ -12,6 +12,7 @@ use str0m::media::{Direction, KeyframeRequest, KeyframeRequestKind, MediaData, M
 use str0m::net::Protocol;
 use str0m::{net::Receive, Candidate, Event, IceConnectionState, Input, Output, Rtc};
 use tokio::net::UdpSocket;
+use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
 
@@ -45,6 +46,9 @@ pub struct SfuPeer {
     pub outgoing_tracks: HashMap<(ParticipantId, MediaKind), Mid>,
     /// Pending SDP offer waiting for client answer
     pub pending_offer: Option<SdpPendingOffer>,
+    /// For pipe transports: maps incoming Mid to the remote participant's DID
+    /// (set when Announce signals include participant_did info)
+    pub virtual_participants: HashMap<Mid, String>,
 }
 
 /// Commands sent to the SFU event loop from the GraphQL API / signalling layer.
@@ -74,8 +78,21 @@ pub enum SfuCommand {
         sdp_answer: SdpAnswer,
         response_tx: oneshot::Sender<Result<(), String>>,
     },
+    /// Answer to a server-initiated pipe renegotiation offer (from cascade).
+    PipeRenegotiateAnswer {
+        pipe_remote_did: String,
+        room_id: RoomId,
+        sdp_answer: SdpAnswer,
+    },
     /// Shut down the SFU server.
     Shutdown,
+}
+
+/// Outbound cascade signal emitted from the event loop (sync context).
+/// Picked up by an async task that sends HTTP requests.
+pub struct CascadeSignalOut {
+    pub neighbourhood_url: String,
+    pub signal: super::cascade::CascadeSignal,
 }
 
 /// Configuration for the SFU server.
@@ -112,6 +129,8 @@ pub struct SfuServer {
     pub local_addr: SocketAddr,
     /// Channel to send commands to the event loop.
     pub command_tx: mpsc::Sender<SfuCommand>,
+    /// Channel to receive outbound cascade signals from the event loop.
+    pub cascade_signal_rx: Arc<tokio::sync::Mutex<mpsc::Receiver<CascadeSignalOut>>>,
 }
 
 impl SfuServer {
@@ -132,12 +151,14 @@ impl SfuServer {
         info!("SFU server bound to UDP {} (resolved: {})", raw_addr, local_addr);
 
         let (command_tx, command_rx) = mpsc::channel(256);
+        let (cascade_tx, cascade_rx) = mpsc::channel(64);
 
-        tokio::spawn(Self::event_loop(socket, command_rx, local_addr));
+        tokio::spawn(Self::event_loop(socket, command_rx, local_addr, cascade_tx));
 
         Ok(Self {
             local_addr,
             command_tx,
+            cascade_signal_rx: Arc::new(tokio::sync::Mutex::new(cascade_rx)),
         })
     }
 
@@ -252,6 +273,7 @@ impl SfuServer {
     fn renegotiate_room(
         peers: &mut HashMap<ParticipantId, SfuPeer>,
         room_id: &RoomId,
+        cascade_signal_tx: Option<&mpsc::Sender<CascadeSignalOut>>,
     ) {
         // Collect all source tracks in the room: (pid, did, [(mid, kind)])
         let sources: Vec<(ParticipantId, String, Vec<(Mid, MediaKind)>)> = peers.iter()
@@ -374,10 +396,20 @@ impl SfuServer {
             }
         }
 
-        // Also handle pipe transports
+        // Also handle pipe transports — send renegotiation via cascade HTTP, not pubsub
         let pipe_ids: Vec<ParticipantId> = peers.iter()
             .filter(|(_, p)| &p.room_id == room_id && p.is_pipe_transport)
             .map(|(pid, _)| pid.clone())
+            .collect();
+
+        // Pre-compute which source pids are non-pipe (to avoid borrow conflict)
+        let non_pipe_pids: std::collections::HashSet<ParticipantId> = peers.iter()
+            .filter(|(_, p)| &p.room_id == room_id && !p.is_pipe_transport)
+            .map(|(pid, _)| pid.clone())
+            .collect();
+        let local_sources: Vec<(ParticipantId, String, Vec<(Mid, MediaKind)>)> = sources.iter()
+            .filter(|(src_pid, _, _)| non_pipe_pids.contains(src_pid))
+            .cloned()
             .collect();
 
         for pid in &pipe_ids {
@@ -386,7 +418,7 @@ impl SfuServer {
                 None => continue,
             };
 
-            let missing = Self::find_missing_receive_tracks(peer, &sources);
+            let missing = Self::find_missing_receive_tracks(peer, &local_sources);
             if !missing.is_empty() {
                 let prev_pending = peer.pending_offer.take();
                 let mut api = peer.rtc.sdp_api();
@@ -416,18 +448,27 @@ impl SfuServer {
                         let offer_json = match serde_json::to_string(&offer) {
                             Ok(j) => j,
                             Err(e) => {
-                                error!("SFU: failed to serialize pipe offer: {}", e);
+                                error!("SFU: failed to serialize pipe renegotiation offer: {}", e);
                                 continue;
                             }
                         };
-                        let event = super::graphql_types::types::RenegotiationOfferEvent {
-                            room_id: peer.room_id.to_string(),
-                            agent_did: peer.agent_did.clone(),
-                            sdp_offer: offer_json,
-                            track_mapping: track_mappings,
-                        };
-                        if let Ok(json) = serde_json::to_string(&event) {
-                            get_global_pubsub_sync().publish_sync(&SFU_RENEGOTIATION_OFFER_TOPIC, &json);
+
+                        // Send via cascade HTTP signaling instead of pubsub
+                        if let Some(ref remote_did) = peer.pipe_remote_did {
+                            let signal = super::cascade::CascadeSignal::PipeRenegotiateOffer {
+                                from_did: peer.agent_did.clone(), // our local DID is stored here? No — use room context
+                                to_did: remote_did.clone(),
+                                room_id: peer.room_id.to_string(),
+                                sdp_offer: offer_json,
+                                track_mapping: track_mappings,
+                            };
+                            if let Some(ref cascade_tx) = cascade_signal_tx {
+                                let _ = cascade_tx.try_send(CascadeSignalOut {
+                                    neighbourhood_url: peer.room_id.neighbourhood_url.clone(),
+                                    signal,
+                                });
+                                info!("SFU: sent PipeRenegotiateOffer to {} for room {}", remote_did, peer.room_id);
+                            }
                         }
                     }
                     None => {}
@@ -441,6 +482,7 @@ impl SfuServer {
         socket: UdpSocket,
         mut command_rx: mpsc::Receiver<SfuCommand>,
         local_addr: SocketAddr,
+        cascade_tx: mpsc::Sender<CascadeSignalOut>,
     ) {
         let mut peers: HashMap<ParticipantId, SfuPeer> = HashMap::new();
         let mut relay = MediaRelay::new();
@@ -678,6 +720,31 @@ impl SfuServer {
                             let _ = response_tx.send(Err(format!("No peer for DID {} in room {}", agent_did, room_id)));
                         }
                     }
+                    Ok(SfuCommand::PipeRenegotiateAnswer { pipe_remote_did, room_id, sdp_answer }) => {
+                        // Find the pipe peer for this remote DID and room
+                        let pipe_pid = peers.iter()
+                            .find(|(_, p)| p.is_pipe_transport && p.pipe_remote_did.as_deref() == Some(&pipe_remote_did) && p.room_id == room_id)
+                            .map(|(pid, _)| pid.clone());
+
+                        if let Some(pid) = pipe_pid {
+                            if let Some(peer) = peers.get_mut(&pid) {
+                                if let Some(pending) = peer.pending_offer.take() {
+                                    match peer.rtc.sdp_api().accept_answer(pending, sdp_answer) {
+                                        Ok(()) => {
+                                            info!("SFU: pipe renegotiation answer accepted from {} for room {}", pipe_remote_did, room_id);
+                                        }
+                                        Err(e) => {
+                                            error!("SFU: failed to accept pipe renegotiation answer from {}: {}", pipe_remote_did, e);
+                                        }
+                                    }
+                                } else {
+                                    warn!("SFU: no pending offer for pipe peer {} — renegotiation answer ignored", pipe_remote_did);
+                                }
+                            }
+                        } else {
+                            warn!("SFU: no pipe peer found for DID {} in room {}", pipe_remote_did, room_id);
+                        }
+                    }
                     Ok(SfuCommand::Shutdown) => {
                         info!("SFU event loop shutting down");
                         return;
@@ -692,7 +759,7 @@ impl SfuServer {
 
             // Perform deferred room renegotiations
             for room_id in &rooms_to_renegotiate {
-                Self::renegotiate_room(&mut peers, room_id);
+                Self::renegotiate_room(&mut peers, room_id, Some(&cascade_tx));
             }
 
             // Clean out disconnected peers
@@ -815,7 +882,7 @@ impl SfuServer {
                     }
                 }
                 for room_id in &rooms_needing_reneg {
-                    Self::renegotiate_room(&mut peers, room_id);
+                    Self::renegotiate_room(&mut peers, room_id, Some(&cascade_tx));
                     // Cancel any pending renegotiation for this room since we just did it
                     pending_renegotiations.remove(room_id);
                 }
@@ -830,7 +897,7 @@ impl SfuServer {
             for room_id in &due {
                 pending_renegotiations.remove(room_id);
                 info!("SFU: executing delayed renegotiation for room {}", room_id);
-                Self::renegotiate_room(&mut peers, room_id);
+                Self::renegotiate_room(&mut peers, room_id, Some(&cascade_tx));
             }
 
             // Relay media data to other peers in the same room

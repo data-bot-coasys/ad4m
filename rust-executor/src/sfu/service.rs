@@ -230,7 +230,10 @@ impl SfuService {
             return Err(RoomError::NotMember.to_string());
         }
 
-        let room_id = RoomId::new(neighbourhood_url, room_name);
+        // Resolve shared_url to local perspective UUID if needed
+        let resolved = self.resolve_neighbourhood_url(neighbourhood_url).await;
+        let nh_url = resolved.as_deref().unwrap_or(neighbourhood_url);
+        let room_id = RoomId::new(nh_url, room_name);
         let pid = ParticipantId::next();
 
         // Check cascade redirect before accepting the participant
@@ -244,7 +247,7 @@ impl SfuService {
                 if let Some(node) = mgr.pick_redirect_node(&room_id.to_string(), local_count) {
                     return Ok(CallSessionInfo {
                         room_name: room_name.to_string(),
-                        neighbourhood_url: neighbourhood_url.to_string(),
+                        neighbourhood_url: nh_url.to_string(),
                         participant_id: String::new(),
                         sdp_answer: String::new(),
                         redirect_to: Some(node.did.clone()),
@@ -259,7 +262,8 @@ impl SfuService {
             let mut rooms = self.rooms.write().await;
             let configs = self.configs.read().await;
             let max = configs
-                .get(neighbourhood_url)
+                .get(nh_url)
+                .or_else(|| configs.get(neighbourhood_url))
                 .map(|c| c.max_mesh_participants as usize * 4);
 
             rooms.create_room(room_id.clone(), max).ok(); // idempotent
@@ -333,10 +337,10 @@ impl SfuService {
         {
             let cascade = self.cascade_manager.read().await;
             let has_cascade = cascade.is_some();
-            info!("call_join: cascade_manager present: {}, will announce for {}/{}", has_cascade, neighbourhood_url, room_name);
+            info!("call_join: cascade_manager present: {}, will announce for {}/{}", has_cascade, nh_url, room_name);
             if has_cascade {
                 drop(cascade);
-                match self.announce_as_sfu_node(neighbourhood_url, room_name).await {
+                match self.announce_as_sfu_node(nh_url, room_name).await {
                     Ok(()) => info!("Auto-announced cascade successfully"),
                     Err(e) => warn!("Failed to auto-announce cascade: {}", e),
                 }
@@ -345,7 +349,7 @@ impl SfuService {
 
         Ok(CallSessionInfo {
             room_name: room_name.to_string(),
-            neighbourhood_url: neighbourhood_url.to_string(),
+            neighbourhood_url: nh_url.to_string(),
             participant_id: pid.to_string(),
             sdp_answer,
             redirect_to: None,
@@ -363,7 +367,9 @@ impl SfuService {
         agent_did: &str,
         sdp_offer_json: &str,
     ) -> Result<CallSessionInfo, String> {
-        let room_id = RoomId::new(neighbourhood_url, room_name);
+        let resolved = self.resolve_neighbourhood_url(neighbourhood_url).await;
+        let nh_url = resolved.as_deref().unwrap_or(neighbourhood_url);
+        let room_id = RoomId::new(nh_url, room_name);
 
         // Verify agent is in the room
         {
@@ -396,7 +402,7 @@ impl SfuService {
 
         Ok(CallSessionInfo {
             room_name: room_name.to_string(),
-            neighbourhood_url: neighbourhood_url.to_string(),
+            neighbourhood_url: nh_url.to_string(),
             participant_id: String::new(), // unchanged
             sdp_answer,
             redirect_to: None,
@@ -412,7 +418,9 @@ impl SfuService {
         agent_did: &str,
         sdp_answer_json: &str,
     ) -> Result<bool, String> {
-        let room_id = RoomId::new(neighbourhood_url, room_name);
+        let resolved = self.resolve_neighbourhood_url(neighbourhood_url).await;
+        let nh_url = resolved.as_deref().unwrap_or(neighbourhood_url);
+        let room_id = RoomId::new(nh_url, room_name);
 
         let answer: str0m::change::SdpAnswer = serde_json::from_str(sdp_answer_json)
             .map_err(|e| format!("Invalid SDP answer: {}", e))?;
@@ -443,7 +451,9 @@ impl SfuService {
         room_name: &str,
         agent_did: &str,
     ) -> Result<bool, String> {
-        let room_id = RoomId::new(neighbourhood_url, room_name);
+        let resolved = self.resolve_neighbourhood_url(neighbourhood_url).await;
+        let nh_url = resolved.as_deref().unwrap_or(neighbourhood_url);
+        let room_id = RoomId::new(nh_url, room_name);
         let mut rooms = self.rooms.write().await;
 
         let room = rooms
@@ -519,10 +529,26 @@ impl SfuService {
     // ---- SFU configuration (Social DNA) ----
 
     /// Get the SFU config for a neighbourhood.
+    /// Resolve a neighbourhood URL that might be a shared_url to the local perspective UUID.
+    async fn resolve_neighbourhood_url(&self, url: &str) -> Option<String> {
+        let s2l = self.shared_to_local.read().await;
+        s2l.get(url).cloned()
+    }
+
     pub async fn get_config(&self, neighbourhood_url: &str) -> SfuConfig {
         let configs = self.configs.read().await;
-        configs.get(neighbourhood_url)
-            .or_else(|| configs.get("global"))
+        // Try direct lookup first, then try resolving shared_url -> local UUID
+        if let Some(config) = configs.get(neighbourhood_url) {
+            return config.clone();
+        }
+        // The client may pass shared_url (neighbourhood://...) but config is keyed by perspective UUID
+        let s2l = self.shared_to_local.read().await;
+        if let Some(local_uuid) = s2l.get(neighbourhood_url) {
+            if let Some(config) = configs.get(local_uuid.as_str()) {
+                return config.clone();
+            }
+        }
+        configs.get("global")
             .cloned()
             .unwrap_or_default()
     }
@@ -597,20 +623,28 @@ impl SfuService {
 
     /// Get the designated SFU peer DID for a neighbourhood.
     pub async fn sfu_peer_for_neighbourhood(&self, neighbourhood_url: &str) -> Option<String> {
+        // Resolve shared_url -> local UUID if needed
+        let resolved_url = self.resolve_neighbourhood_url(neighbourhood_url).await;
+        let lookup_url = resolved_url.as_deref().unwrap_or(neighbourhood_url);
         let configs = self.configs.read().await;
-        let config = configs.get(neighbourhood_url)
+        let config = configs.get(lookup_url)
+            .or_else(|| configs.get(neighbourhood_url))
             .or_else(|| configs.get("global"));
         config.and_then(|c| match c.mode.as_str() {
                 "designated" => c.designated_peer.clone(),
-                "gateway" | "cascaded" => Some("gateway".to_string()), // Sentinel — caller resolves gateway DID
+                "gateway" | "cascaded" => Some("gateway".to_string()),
                 _ => None,
             })
     }
 
     /// Get the SFU peer DIDs for a neighbourhood (cascaded mode returns multiple).
     pub async fn sfu_peers_for_neighbourhood(&self, neighbourhood_url: &str) -> Vec<String> {
+        let resolved_url = self.resolve_neighbourhood_url(neighbourhood_url).await;
+        let lookup_url = resolved_url.as_deref().unwrap_or(neighbourhood_url);
         let configs = self.configs.read().await;
-        match configs.get(neighbourhood_url) {
+        let config = configs.get(lookup_url)
+            .or_else(|| configs.get(neighbourhood_url));
+        match config {
             Some(c) if c.mode == "cascaded" => c.sfu_peers.clone(),
             Some(c) if c.mode == "designated" => {
                 c.designated_peer.iter().cloned().collect()

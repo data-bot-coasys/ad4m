@@ -75,6 +75,12 @@ pub enum CascadeSignal {
         room_id: String,
         participant_count: u32,
         capacity_hint: u32,
+        /// When announcing a specific participant joining, their DID
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        participant_did: Option<String>,
+        /// Track kinds the participant has (e.g. ["audio", "video"])
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        track_kinds: Vec<String>,
     },
     /// SDP offer to establish a pipe transport between two SFU nodes
     #[serde(rename = "sfu-pipe-offer")]
@@ -87,6 +93,25 @@ pub enum CascadeSignal {
     /// SDP answer for pipe transport
     #[serde(rename = "sfu-pipe-answer")]
     PipeAnswer {
+        from_did: String,
+        to_did: String,
+        room_id: String,
+        sdp_answer: String,
+    },
+    /// SDP renegotiation offer for an existing pipe transport (new tracks added)
+    #[serde(rename = "sfu-pipe-renegotiate-offer")]
+    PipeRenegotiateOffer {
+        from_did: String,
+        to_did: String,
+        room_id: String,
+        sdp_offer: String,
+        /// Track mapping: ["mid:participantDid:kind", ...]
+        #[serde(default)]
+        track_mapping: Vec<String>,
+    },
+    /// SDP renegotiation answer for an existing pipe transport
+    #[serde(rename = "sfu-pipe-renegotiate-answer")]
+    PipeRenegotiateAnswer {
         from_did: String,
         to_did: String,
         room_id: String,
@@ -132,6 +157,26 @@ impl CascadeManager {
             room_id: room_id.to_string(),
             participant_count,
             capacity_hint: self.max_participants_per_node,
+            participant_did: None,
+            track_kinds: Vec::new(),
+        }
+    }
+
+    /// Generate an announce signal that includes a specific participant's info.
+    pub fn announce_participant(
+        &self,
+        room_id: &RoomId,
+        participant_count: u32,
+        participant_did: &str,
+        track_kinds: Vec<String>,
+    ) -> CascadeSignal {
+        CascadeSignal::Announce {
+            did: self.local_did.clone(),
+            room_id: room_id.to_string(),
+            participant_count,
+            capacity_hint: self.max_participants_per_node,
+            participant_did: Some(participant_did.to_string()),
+            track_kinds,
         }
     }
 
@@ -374,6 +419,11 @@ impl CascadeManager {
         }
         None
     }
+
+    /// Get the local DID.
+    pub fn local_did(&self) -> &str {
+        &self.local_did
+    }
 }
 
 #[cfg(test)]
@@ -501,7 +551,7 @@ mod tests {
         // node_a announces
         let signal = node_a.announce_sfu_node(&room_id, 3);
         match &signal {
-            CascadeSignal::Announce { did, room_id: _rid, participant_count, capacity_hint: _ } => {
+            CascadeSignal::Announce { did, room_id: _rid, participant_count, capacity_hint: _, .. } => {
                 assert_eq!(did, "did:key:nodeA");
                 assert_eq!(*participant_count, 3);
             }
@@ -523,6 +573,21 @@ mod tests {
         // Verify cascaded detection
         assert!(node_b.is_cascaded(&room_id.to_string()));
         assert!(!node_a.is_cascaded(&room_id.to_string()));
+    }
+
+    #[test]
+    fn test_cascade_announce_with_participant() {
+        let mgr = CascadeManager::new("did:key:nodeA".into(), test_addr(10010), 8);
+        let room_id = RoomId::new("test-nh", "room1");
+
+        let signal = mgr.announce_participant(&room_id, 1, "did:key:alice", vec!["audio".into(), "video".into()]);
+        match &signal {
+            CascadeSignal::Announce { participant_did, track_kinds, .. } => {
+                assert_eq!(participant_did.as_deref(), Some("did:key:alice"));
+                assert_eq!(track_kinds, &vec!["audio".to_string(), "video".to_string()]);
+            }
+            _ => panic!("Expected Announce signal"),
+        }
     }
 
     #[test]
@@ -641,5 +706,32 @@ mod tests {
         // Remove all from SFU node
         room.remove_remote_participants_from_node("did:key:sfuB");
         assert_eq!(room.total_participant_count(), 1);
+    }
+
+    #[test]
+    fn test_cascade_signal_serialization() {
+        // Test that PipeRenegotiateOffer/Answer serialize correctly
+        let signal = CascadeSignal::PipeRenegotiateOffer {
+            from_did: "did:key:a".into(),
+            to_did: "did:key:b".into(),
+            room_id: "room1".into(),
+            sdp_offer: "{}".into(),
+            track_mapping: vec!["0:did:key:alice:audio".into()],
+        };
+        let json = serde_json::to_string(&signal).unwrap();
+        assert!(json.contains("sfu-pipe-renegotiate-offer"));
+
+        let signal2 = CascadeSignal::PipeRenegotiateAnswer {
+            from_did: "did:key:b".into(),
+            to_did: "did:key:a".into(),
+            room_id: "room1".into(),
+            sdp_answer: "{}".into(),
+        };
+        let json2 = serde_json::to_string(&signal2).unwrap();
+        assert!(json2.contains("sfu-pipe-renegotiate-answer"));
+
+        // Round-trip
+        let _: CascadeSignal = serde_json::from_str(&json).unwrap();
+        let _: CascadeSignal = serde_json::from_str(&json2).unwrap();
     }
 }
