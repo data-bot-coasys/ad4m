@@ -306,6 +306,7 @@ impl SfuService {
             pipe_remote_did: None,
             outgoing_tracks: HashMap::new(),
             pending_offer: None,
+            virtual_participants: HashMap::new(),
         };
 
         self.server
@@ -579,8 +580,10 @@ impl SfuService {
         let is_cascaded = config.mode == "cascaded";
         configs.insert(neighbourhood_url.to_string(), config.clone());
 
-        // Initialize or tear down the cascade manager based on mode
-        if is_cascaded {
+        // Initialize or tear down the cascade manager based on mode.
+        // Skip cascade manager init for "global" — it is just a fallback config.
+        // Only real perspective UUIDs should create cascade managers with namespace mapping.
+        if is_cascaded && neighbourhood_url != "global" {
             let agent_did = crate::agent::did();
             let local_addr = self.server.local_addr;
             let max_per_node = config.max_participants_per_node.unwrap_or(12);
@@ -613,7 +616,7 @@ impl SfuService {
             } else {
                 warn!("Perspective {} not found for namespace mapping", neighbourhood_url);
             }
-        } else {
+        } else if neighbourhood_url != "global" {
             let mut cascade = self.cascade_manager.write().await;
             *cascade = None;
         }
@@ -724,7 +727,18 @@ impl SfuService {
         let configs = self.configs.read().await;
         let config = match configs.get(neighbourhood_url) {
             Some(c) => c.clone(),
-            None => return Ok(()),
+            None => {
+                // Try resolving shared namespace to local UUID
+                let s2l = self.shared_to_local.read().await;
+                if let Some(local_uuid) = s2l.get(neighbourhood_url) {
+                    match configs.get(local_uuid.as_str()) {
+                        Some(c) => c.clone(),
+                        None => return Ok(()),
+                    }
+                } else {
+                    return Ok(());
+                }
+            }
         };
         drop(configs);
 
@@ -764,6 +778,7 @@ impl SfuService {
 
     /// Handle an incoming cascade signal from a peer SFU node.
     pub async fn handle_cascade_signal(&self, signal_json: &str) -> Result<(), String> {
+        info!("handle_cascade_signal received: {}", &signal_json[..std::cmp::min(200, signal_json.len())]);
         let signal: super::cascade::CascadeSignal = serde_json::from_str(signal_json)
             .map_err(|e| format!("Invalid cascade signal: {}", e))?;
 
@@ -772,7 +787,7 @@ impl SfuService {
             .ok_or("Cascade manager not initialized")?;
 
         match signal {
-            super::cascade::CascadeSignal::Announce { did, room_id, participant_count, capacity_hint } => {
+            super::cascade::CascadeSignal::Announce { did, room_id, participant_count, capacity_hint, participant_did, track_kinds } => {
                 mgr.handle_sfu_announce(did.clone(), room_id.clone(), participant_count, capacity_hint);
                 
                 // Auto-establish pipe transport if we have participants in the same room.
@@ -790,6 +805,7 @@ impl SfuService {
                     .unwrap_or(false);
                 drop(rooms);
                 
+                info!("Cascade announce: room={}, local_nh={}, local_has_participants={}, remote_count={}", room_id, local_nh_url, local_has_participants, participant_count);
                 if local_has_participants && participant_count > 0 {
                     info!("Auto-establishing pipe transport to {} for room {}", did, room_id);
                     match mgr.establish_pipe(&did, &local_room_id) {
@@ -829,6 +845,7 @@ impl SfuService {
                         pipe_remote_did: Some(from_did.clone()),
                         outgoing_tracks: HashMap::new(),
                         pending_offer: None,
+                        virtual_participants: HashMap::new(),
                     };
                     let _ = self.server.command_tx.send(SfuCommand::AddPeer(peer)).await;
                 }
@@ -865,6 +882,7 @@ impl SfuService {
                         pipe_remote_did: Some(from_did.clone()),
                         outgoing_tracks: HashMap::new(),
                         pending_offer: None,
+                        virtual_participants: HashMap::new(),
                     };
                     let _ = self.server.command_tx.send(SfuCommand::AddPeer(peer)).await;
                 }
@@ -872,6 +890,16 @@ impl SfuService {
             }
             super::cascade::CascadeSignal::Leave { did, .. } => {
                 mgr.remove_node(&did);
+                Ok(())
+            }
+            super::cascade::CascadeSignal::PipeRenegotiateOffer { .. } => {
+                // TODO: handle pipe renegotiation
+                warn!("PipeRenegotiateOffer not yet implemented");
+                Ok(())
+            }
+            super::cascade::CascadeSignal::PipeRenegotiateAnswer { .. } => {
+                // TODO: handle pipe renegotiation
+                warn!("PipeRenegotiateAnswer not yet implemented");
                 Ok(())
             }
         }

@@ -491,14 +491,22 @@ export class NeighbourhoodClient {
                 $mode: String!,
                 $designatedPeer: String,
                 $fallback: String,
-                $maxMeshParticipants: Int
+                $maxMeshParticipants: Int,
+                $sfuPeers: [String!],
+                $maxParticipantsPerNode: Int,
+                $peerEndpoints: [String!],
+                $peerAuthTokens: [String!]
             ) {
                 sfuSetConfig(
                     neighbourhoodUrl: $neighbourhoodUrl,
                     mode: $mode,
                     designatedPeer: $designatedPeer,
                     fallback: $fallback,
-                    maxMeshParticipants: $maxMeshParticipants
+                    maxMeshParticipants: $maxMeshParticipants,
+                    sfuPeers: $sfuPeers,
+                    maxParticipantsPerNode: $maxParticipantsPerNode,
+                    peerEndpoints: $peerEndpoints,
+                    peerAuthTokens: $peerAuthTokens
                 )
             }`,
             variables: {
@@ -507,6 +515,10 @@ export class NeighbourhoodClient {
                 designatedPeer: config.designatedPeer,
                 fallback: config.fallback,
                 maxMeshParticipants: config.maxMeshParticipants,
+                sfuPeers: config.sfuPeers,
+                maxParticipantsPerNode: config.maxParticipantsPerNode,
+                peerEndpoints: config.peerEndpoints,
+                peerAuthTokens: config.peerAuthTokens,
             }
         }))
         return sfuSetConfig
@@ -544,6 +556,8 @@ export interface SfuConfig {
     fallback: string
     maxMeshParticipants: number
     maxParticipantsPerNode: number | null
+    peerEndpoints?: string[]
+    peerAuthTokens?: string[]
 }
 
 export interface SfuNode {
