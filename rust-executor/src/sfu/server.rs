@@ -449,6 +449,7 @@ impl SfuServer {
         // Rooms that need renegotiation (deferred to end of command processing)
         let mut rooms_to_renegotiate: Vec<RoomId> = Vec::new();
 
+        let mut pending_renegotiations: HashMap<RoomId, std::time::Instant> = HashMap::new();
         // Resolve 0.0.0.0 to actual IP for ICE candidate matching
         let resolved_local_addr = if local_addr.ip().is_unspecified() {
             let probe = std::net::UdpSocket::bind("0.0.0.0:0").ok()
@@ -494,10 +495,16 @@ impl SfuServer {
                             }
                         }
 
-                        // Schedule room renegotiation (will happen after all commands processed)
-                        if !rooms_to_renegotiate.contains(&room_id) {
-                            rooms_to_renegotiate.push(room_id.clone());
-                        }
+                        // Don't renegotiate immediately on AddPeer.
+                        // Instead, we wait for MediaAdded (when this peer starts sending)
+                        // which triggers renegotiation naturally. This avoids a race where
+                        // the renegotiation offer is published before the joiner's
+                        // GraphQL subscription is established.
+                        //
+                        // For the JOINER who needs existing peers' tracks:
+                        // We schedule a delayed renegotiation via a flag on the peer.
+                        // The next poll tick (100ms later) will check for pending renegotiations.
+                        pending_renegotiations.insert(room_id.clone(), std::time::Instant::now() + std::time::Duration::from_millis(500));
 
                         peers.insert(pid, peer);
                     }
@@ -800,17 +807,30 @@ impl SfuServer {
             }
 
             // If new tracks appeared, trigger renegotiation for their rooms
-            // (skip rooms already renegotiated this tick from AddPeer)
             if !new_tracks.is_empty() {
                 let mut rooms_needing_reneg: Vec<RoomId> = Vec::new();
                 for (_, room_id, _, _) in &new_tracks {
-                    if !rooms_needing_reneg.contains(room_id) && !rooms_to_renegotiate.contains(room_id) {
+                    if !rooms_needing_reneg.contains(room_id) {
                         rooms_needing_reneg.push(room_id.clone());
                     }
                 }
                 for room_id in &rooms_needing_reneg {
                     Self::renegotiate_room(&mut peers, room_id);
+                    // Cancel any pending renegotiation for this room since we just did it
+                    pending_renegotiations.remove(room_id);
                 }
+            }
+            
+            // Check for delayed renegotiations (from AddPeer)
+            let now_instant = std::time::Instant::now();
+            let due: Vec<RoomId> = pending_renegotiations.iter()
+                .filter(|(_, when)| now_instant >= **when)
+                .map(|(room_id, _)| room_id.clone())
+                .collect();
+            for room_id in &due {
+                pending_renegotiations.remove(room_id);
+                info!("SFU: executing delayed renegotiation for room {}", room_id);
+                Self::renegotiate_room(&mut peers, room_id);
             }
 
             // Relay media data to other peers in the same room

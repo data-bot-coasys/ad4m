@@ -3208,7 +3208,7 @@ impl Mutation {
 
         // Validate and clamp max_mesh_participants to avoid negative/overflow issues
         let max_mesh = match max_mesh_participants {
-            Some(v) if v < 2 => 2u32,
+            Some(v) if v < 0 => 0u32,
             Some(v) if v > 20 => 20u32,
             Some(v) => v as u32,
             None => 4u32,
